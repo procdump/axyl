@@ -1,0 +1,50 @@
+name: Benchmarks
+
+# Runs the Criterion benchmarks (currently the EVM transaction signature-recovery
+# benches). Primarily a manual tool — run it before/after a change to compare —
+# plus a weekly scheduled run so the benches don't bit-rot. Results are in the
+# job log; this workflow does not fail on regressions (no committed baseline).
+#
+# Not part of PR checks.
+
+# This workflow only reads the repo (checkout + build + bench); it never writes
+# back. Pin least-privilege so the GITHUB_TOKEN can't be misused.
+permissions:
+  contents: read
+
+on:
+  schedule:
+    - cron: '0 5 * * 1'  # 05:00 UTC every Monday
+  workflow_dispatch:
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: ""
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  bench:
+    name: EVM benchmarks
+    runs-on: ubuntu-latest-m
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+
+      - name: Install Rust 1.91.0
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, rust-src, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: nightly-bench
+          cache-on-failure: true
+
+      - name: Run EVM benchmarks
+        run: cargo bench -p rayls-execution-evm

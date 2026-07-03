@@ -1,0 +1,661 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rayls Dev Chain</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --panel2: #1c232c; --border: #2b333d;
+    --text: #e6edf3; --muted: #8b949e; --green: #2ea043; --red: #f85149;
+    --accent: #4a9eed; --amber: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 14px 20px;
+    border-bottom: 1px solid var(--border); background: var(--panel);
+    position: sticky; top: 0; z-index: 5; flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px;
+    border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--border);
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .pill.up { color: var(--green); border-color: rgba(46,160,67,.4); background: rgba(46,160,67,.1); }
+  .pill.up .dot { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .pill.down { color: var(--red); border-color: rgba(248,81,73,.4); background: rgba(248,81,73,.1); }
+  .pill.down .dot { background: var(--red); }
+  .spacer { flex: 1; }
+  .rpc { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .rpc input {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 8px; font-size: 12px; width: 210px; font-family: ui-monospace, monospace;
+  }
+
+  .layout { display: flex; align-items: flex-start; }
+  .sidebar {
+    width: 256px; flex-shrink: 0; padding: 18px 16px; border-right: 1px solid var(--border);
+    min-height: calc(100vh - 53px); position: sticky; top: 53px; align-self: stretch;
+  }
+  .sidebar h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 10px; }
+  .sidebar h2.spaced { margin-top: 22px; }
+  .from { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+  .btn {
+    display: block; width: 100%; text-align: left; margin-bottom: 8px; padding: 9px 12px;
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; font-size: 13px; font-weight: 550; cursor: pointer;
+  }
+  .btn:hover:not(:disabled) { border-color: var(--accent); background: #232b35; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn .b-sub { display: block; color: var(--muted); font-size: 11px; font-weight: 400; margin-top: 2px; }
+  .activity { display: flex; flex-direction: column; gap: 7px; max-height: 420px; overflow-y: auto; }
+  .act { font-size: 12px; padding: 7px 9px; background: var(--panel); border: 1px solid var(--border); border-radius: 7px; }
+  .act .act-top { display: flex; gap: 6px; align-items: baseline; }
+  .act .st { width: 14px; flex-shrink: 0; }
+  .act.ok { border-color: rgba(46,160,67,.4); }
+  .act.err { border-color: rgba(248,81,73,.4); }
+  .act .act-hash { color: var(--muted); display: block; margin-top: 3px; }
+  .act-empty { color: var(--muted); font-size: 12px; }
+
+  main { padding: 20px; flex: 1; min-width: 0; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
+  .card .value { font-size: 22px; font-weight: 650; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .card .value small { font-size: 12px; color: var(--muted); font-weight: 500; }
+  .grid2 { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; margin-top: 20px; }
+  /* 2x2 dashboard grid: [tx feed | tx details] over [blocks | rpc tests] */
+  .grid-main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 20px; align-items: start; }
+  .tbl { max-height: 440px; overflow: auto; }
+  /* details is a short, bounded list — show it all, no scroll hiding Hash/Status */
+  #txdetail-panel .tbl { max-height: none; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .panel h2 {
+    font-size: 13px; margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--border);
+    color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .6px;
+  }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 9px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
+  .tbl thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+  tbody tr.block-row { cursor: pointer; }
+  tbody tr.block-row:hover { background: var(--panel2); }
+  td.num { color: var(--accent); font-weight: 600; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .muted { color: var(--muted); }
+  .txs { background: var(--panel2); }
+  .txs td { padding: 6px 16px 6px 28px; font-size: 12px; border-bottom: 1px solid var(--border); }
+  .empty { padding: 22px 16px; color: var(--muted); text-align: center; }
+  .arrow { color: var(--muted); margin: 0 4px; }
+  .val { color: var(--amber); }
+  footer { padding: 0 20px 20px; color: var(--muted); font-size: 12px; }
+  a { color: var(--accent); text-decoration: none; }
+
+  /* clickable tx rows + selection */
+  #txs tr[data-hash] { cursor: pointer; }
+  #txs tr[data-hash]:hover { background: var(--panel2); }
+  tr.selected, tr.selected:hover { background: rgba(74,158,237,.14); }
+  /* click-to-copy values */
+  .copyable { cursor: pointer; }
+  .copyable:hover { color: var(--accent); }
+  /* "clear" affordance in a panel header */
+  .clearlink { float: right; text-transform: none; font-weight: 400; letter-spacing: 0; font-size: 11px; cursor: pointer; }
+  .clearlink:hover { color: var(--accent); }
+  /* transient copy/confirm toast */
+  .toast {
+    position: fixed; bottom: 18px; left: 50%; z-index: 50; pointer-events: none;
+    transform: translateX(-50%) translateY(12px); opacity: 0;
+    background: var(--panel2); color: var(--text); border: 1px solid var(--accent);
+    border-radius: 8px; padding: 8px 14px; font-size: 12px; box-shadow: 0 4px 18px rgba(0,0,0,.4);
+    transition: opacity .15s ease, transform .15s ease;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  @media (max-width: 1024px) { .grid-main { grid-template-columns: 1fr; } }
+  @media (max-width: 820px) {
+    .layout { flex-direction: column; }
+    .sidebar { width: auto; border-right: none; border-bottom: 1px solid var(--border); min-height: 0; position: static; }
+    .grid2 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Rayls Dev Chain</h1>
+  <span id="status" class="pill down"><span class="dot"></span><span id="status-text">connecting…</span></span>
+  <span class="spacer"></span>
+  <span class="rpc">RPC <input id="rpc" spellcheck="false" /></span>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <h2>Send transactions</h2>
+    <div class="from">From dev&nbsp;#0<br><span class="mono" id="from-addr"></span></div>
+    <button class="btn" id="send1">Send 1 USDr<span class="b-sub">→ dev&nbsp;#1</span></button>
+    <button class="btn" id="send5">Burst: 5 transactions<span class="b-sub">→ dev&nbsp;#1, consecutive nonces</span></button>
+    <button class="btn" id="sendrnd">Send to a random address<span class="b-sub">1 USDr → fresh recipient</span></button>
+    <button class="btn" id="deploy">Deploy test contract<span class="b-sub">deploys a contract that returns 42</span></button>
+    <button class="btn" id="rpctest">Test RPC endpoints<span class="b-sub">calls each method with live chain data</span></button>
+
+    <h2 class="spaced">Activity</h2>
+    <div class="activity" id="activity"><div class="act-empty">Click a button to send a transaction and watch it land in a block.</div></div>
+  </aside>
+
+  <main>
+    <div class="cards">
+      <div class="card"><div class="label">Chain ID</div><div class="value" id="chainid">—</div></div>
+      <div class="card"><div class="label">Block height</div><div class="value" id="height">—</div></div>
+      <div class="card"><div class="label">Avg block time</div><div class="value" id="blocktime">—<small> s</small></div></div>
+      <div class="card"><div class="label">Txs seen</div><div class="value" id="txcount">—</div></div>
+      <div class="card"><div class="label">Gas price</div><div class="value" id="gasprice">—<small> gwei</small></div></div>
+      <div class="card"><div class="label">Peers</div><div class="value" id="peers">—</div></div>
+    </div>
+
+    <div class="grid-main">
+      <div class="panel">
+        <h2>Recent transactions <span class="clearlink" id="clear-txs" title="forget tracked transactions">clear</span></h2>
+        <div class="tbl"><table>
+          <thead><tr><th>Hash</th><th>From → To</th><th>Value</th></tr></thead>
+          <tbody id="txs"><tr><td colspan="3" class="empty">no transactions yet — send one from the left</td></tr></tbody>
+        </table></div>
+      </div>
+      <div class="panel" id="txdetail-panel">
+        <h2>Transaction details <span class="muted" id="txdetail-hash" style="text-transform:none;font-weight:400;letter-spacing:0;margin-left:8px"></span></h2>
+        <div class="tbl"><table>
+          <tbody id="txdetail"><tr><td colspan="2" class="empty">click a transaction on the left to see its full details</td></tr></tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <h2>Recent blocks <span class="muted" style="text-transform:none;font-weight:400;letter-spacing:0">(click a row to expand)</span></h2>
+        <div class="tbl"><table>
+          <thead><tr><th>Block</th><th>Hash</th><th>Txs</th><th>Age</th><th>Miner</th></tr></thead>
+          <tbody id="blocks"><tr><td colspan="5" class="empty">waiting for blocks…</td></tr></tbody>
+        </table></div>
+      </div>
+      <div class="panel" id="rpc-panel">
+        <h2>RPC endpoint tests <span class="muted" id="rpc-summary" style="text-transform:none;font-weight:400;letter-spacing:0;margin-left:8px"></span></h2>
+        <div class="tbl"><table>
+          <thead><tr><th>Method</th><th>Status</th><th>Result</th></tr></thead>
+          <tbody id="rpc-results"><tr><td colspan="3" class="empty">click “Test RPC endpoints” to call each method with live chain data</td></tr></tbody>
+        </table></div>
+      </div>
+    </div>
+
+    <footer>
+      Polling every 1.5s · dev mode only. Buttons sign with the public dev key server-side and submit via the RPC.
+      See <a href="https://github.com/raylsnetwork/axyl/blob/main/doc/dev-mode.md">dev-mode docs</a> for the pre-funded accounts.
+    </footer>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+const DEFAULT_RPC = "__RPC_URL__";
+const MAX_BLOCKS = 20;
+const rpcInput = document.getElementById("rpc");
+rpcInput.value = (localStorage.getItem("rayls.rpc") || DEFAULT_RPC);
+rpcInput.addEventListener("change", () => { localStorage.setItem("rayls.rpc", rpcInput.value.trim()); blocks.clear(); });
+
+const blocks = new Map();   // number -> block (with full txs)
+let lastHeight = -1, rpcId = 0;
+// Wall-clock block-production rate, so "block time" is meaningful on a sub-second chain
+// (block timestamps are 1s-resolution, so 100+ blocks share a timestamp → unusable).
+let lastRateTime = null, lastRateHeight = 0, blockTimeMs = null;
+
+// Transactions submitted FROM this dashboard, persisted to localStorage so they
+// survive reloads and stay visible regardless of age. The dev chain mints 100+
+// empty blocks/s, so scanning recent blocks can't reliably surface tx history
+// (a tx scrolls out of any bounded window in <1s). Every send here yields a hash
+// and a receipt, which is reliable — track those instead. Newest first.
+const TX_STORE_KEY = "rayls.devtxs.v1";
+const MAX_TXS = 50;
+let myTxs = [];
+try { myTxs = JSON.parse(localStorage.getItem(TX_STORE_KEY) || "[]"); } catch (e) { myTxs = []; }
+const saveTxs = () => { try { localStorage.setItem(TX_STORE_KEY, JSON.stringify(myTxs.slice(0, MAX_TXS))); } catch (e) {} };
+// Record a freshly-submitted tx (status pending; block filled in on receipt).
+function recordTx(hash, to, valueWei, kind) {
+  if (!hash || myTxs.some((t) => t.hash === hash)) return;
+  myTxs.unshift({ hash, from: FROM, to: to || null, value: valueWei || "0x0", kind: kind || "transfer", status: "pending", block: null });
+  if (myTxs.length > MAX_TXS) myTxs.length = MAX_TXS;
+  saveTxs(); renderTxFeed(); renderStats();
+}
+// Patch a tracked tx once its receipt lands (status / block / contract address).
+function markTx(hash, patch) {
+  const t = myTxs.find((x) => x.hash === hash);
+  if (t) { Object.assign(t, patch); saveTxs(); renderTxFeed(); }
+}
+
+const $ = (id) => document.getElementById(id);
+const hexToBig = (h) => (h == null ? 0n : BigInt(h));
+const hexToNum = (h) => Number(hexToBig(h));
+const short = (s, n = 6) => (!s ? "—" : s.length <= 2 + n * 2 ? s : s.slice(0, 2 + n) + "…" + s.slice(-n));
+const fmtEther = (wei) => {
+  const w = hexToBig(wei); if (w === 0n) return "0";
+  const i = w / 10n ** 18n, f = (w % 10n ** 18n).toString().padStart(18, "0").slice(0, 4).replace(/0+$/, "");
+  return f ? `${i}.${f}` : i.toString();
+};
+
+async function rpc(method, params = []) {
+  const url = rpcInput.value.trim() || DEFAULT_RPC;
+  const res = await fetch(url, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }),
+  });
+  const j = await res.json();
+  if (j.error) throw new Error(j.error.message || "rpc error");
+  return j.result;
+}
+
+let toastTimer = null;
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 1600);
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); toast("Copied " + short(text, 8)); }
+  catch (e) { toast("Copy failed — select the text manually"); }
+}
+
+function setStatus(up) {
+  const el = $("status"); el.className = "pill " + (up ? "up" : "down");
+  $("status-text").textContent = up ? "RUNNING" : "OFFLINE";
+}
+
+function renderStats() {
+  let bt = "—";
+  if (blockTimeMs != null && blockTimeMs > 0) {
+    bt = blockTimeMs < 1000 ? Math.round(blockTimeMs) + '<small> ms</small>' : (blockTimeMs / 1000).toFixed(2) + '<small> s</small>';
+  }
+  $("blocktime").innerHTML = bt;
+  $("txcount").textContent = myTxs.length;
+}
+
+function renderBlocks() {
+  const arr = [...blocks.values()].sort((a, b) => hexToNum(b.number) - hexToNum(a.number)).slice(0, MAX_BLOCKS);
+  const now = Math.floor(Date.now() / 1000);
+  const tb = $("blocks");
+  if (!arr.length) { tb.innerHTML = '<tr><td colspan="5" class="empty">waiting for blocks…</td></tr>'; return; }
+  tb.innerHTML = "";
+  for (const b of arr) {
+    const num = hexToNum(b.number), age = Math.max(0, now - hexToNum(b.timestamp));
+    const ntx = b.transactions ? b.transactions.length : 0;
+    const row = document.createElement("tr");
+    row.className = "block-row";
+    row.innerHTML = `<td class="num">#${num}</td><td class="mono">${short(b.hash)}</td>` +
+      `<td>${ntx}</td><td class="muted">${age}s ago</td><td class="mono muted">${short(b.miner, 5)}</td>`;
+    tb.appendChild(row);
+    if (ntx > 0) {
+      const detail = document.createElement("tr");
+      detail.className = "txs"; detail.style.display = "none";
+      const cell = document.createElement("td"); cell.colSpan = 5;
+      cell.innerHTML = b.transactions.map((t) =>
+        `<div class="mono">${short(t.hash)} <span class="muted">${short(t.from, 5)}</span>` +
+        `<span class="arrow">→</span><span class="muted">${t.to ? short(t.to, 5) : "(contract create)"}</span>` +
+        ` <span class="val">${fmtEther(t.value)} USDr</span></div>`).join("");
+      detail.appendChild(cell); tb.appendChild(detail);
+      row.addEventListener("click", () => { detail.style.display = detail.style.display === "none" ? "table-row" : "none"; });
+    }
+  }
+}
+
+function renderTxFeed() {
+  const tb = $("txs");
+  if (!myTxs.length) { tb.innerHTML = '<tr><td colspan="3" class="empty">no transactions yet</td></tr>'; return; }
+  const icon = (s) => (s === "ok" ? "✓" : s === "reverted" ? "✗" : "⏳");
+  const dest = (t) => t.kind === "deploy"
+    ? (t.contractAddr ? acctLabel(t.contractAddr) + " <span class=\"muted\">(new)</span>" : "<span class=\"muted\">create</span>")
+    : (t.to ? acctLabel(t.to) : "<span class=\"muted\">create</span>");
+  const where = (t) => t.block != null ? ` <span class="muted">#${t.block}</span>` : (t.status === "pending" ? ' <span class="muted">pending</span>' : "");
+  tb.innerHTML = myTxs.slice(0, 12).map((t) =>
+    `<tr data-hash="${t.hash}" title="click for details"><td class="mono">${icon(t.status)} ${short(t.hash)}</td>` +
+    `<td class="mono muted">${acctLabel(t.from)}<span class="arrow">→</span>${dest(t)}</td>` +
+    `<td class="val">${fmtEther(t.value)}${where(t)}</td></tr>`).join("");
+}
+
+async function poll() {
+  try {
+    const [cid, head, gas] = await Promise.all([rpc("eth_chainId"), rpc("eth_blockNumber"), rpc("eth_gasPrice").catch(() => null)]);
+    setStatus(true);
+    $("chainid").textContent = hexToNum(cid);
+    const h = hexToNum(head);
+    $("height").textContent = h.toLocaleString();
+    const tnow = Date.now();
+    if (lastRateTime != null && h > lastRateHeight) {
+      const dt = (tnow - lastRateTime) / 1000, dh = h - lastRateHeight;
+      if (dt > 0) blockTimeMs = (dt / dh) * 1000;
+    }
+    lastRateTime = tnow; lastRateHeight = h;
+    if (gas != null) $("gasprice").innerHTML = (hexToNum(gas) / 1e9).toFixed(2) + '<small> gwei</small>';
+    rpc("net_peerCount").then((p) => { $("peers").textContent = hexToNum(p); }).catch(() => { $("peers").textContent = "n/a"; });
+
+    // Only fetch the most recent window for the "Recent blocks" table — never
+    // try to walk the whole gap, which on a 100+ blk/s chain would fall behind
+    // forever. Tx history comes from the tracked-tx list, not this scan.
+    const from = Math.max(lastHeight + 1, h - MAX_BLOCKS + 1);
+    for (let n = from; n <= h; n++) {
+      const blk = await rpc("eth_getBlockByNumber", ["0x" + n.toString(16), true]);
+      if (blk) blocks.set(n, blk);
+    }
+    lastHeight = h;
+    if (blocks.size > MAX_BLOCKS) {
+      [...blocks.keys()].sort((a, b) => a - b).slice(0, blocks.size - MAX_BLOCKS).forEach((k) => blocks.delete(k));
+    }
+    renderStats(); renderBlocks(); renderTxFeed();
+  } catch (e) {
+    setStatus(false);
+  }
+}
+
+// --- Actions panel: send real transactions through the RPC ----------------
+// Public, well-known dev accounts (see doc/dev-mode.md). Sends are signed by
+// dev account #0 server-side (`/api/sign`) so the page needs no JS crypto lib.
+const DEV = [
+  "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+  "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+];
+const FROM = DEV[0];
+// Friendly labels for the well-known dev accounts (clearer than raw 0x… in the feed).
+const acctName = {};
+DEV.forEach((a, i) => { acctName[a.toLowerCase()] = "dev #" + i; });
+const acctLabel = (addr, n = 4) => (addr ? (acctName[String(addr).toLowerCase()] || short(addr, n)) : "—");
+const ONE_USDR = "1000000000000000000"; // 1e18 wei, as a string (exceeds JS safe int)
+let actSeq = 0, busy = false;
+$("from-addr").textContent = short(FROM, 8);
+
+function setBusy(b) { busy = b; ["send1", "send5", "sendrnd", "deploy"].forEach((id) => { $(id).disabled = b; }); }
+
+function logAct(label) {
+  const act = $("activity");
+  const empty = act.querySelector(".act-empty");
+  if (empty) empty.remove();
+  const el = document.createElement("div");
+  el.className = "act"; el.id = "act-" + (++actSeq);
+  el.innerHTML = `<div class="act-top"><span class="st">⏳</span><span>${label}</span></div>` +
+    `<span class="act-hash mono">submitting…</span>`;
+  act.prepend(el);
+  return el;
+}
+function updateAct(el, { st, cls, hash, note }) {
+  if (st) el.querySelector(".st").textContent = st;
+  if (cls) el.className = "act " + cls;
+  if (hash != null || note != null) {
+    el.querySelector(".act-hash").innerHTML = (hash ? short(hash, 8) + " " : "") + (note || "");
+  }
+}
+
+// Ask the server to sign a transfer from dev #0 (same-origin /api/sign).
+async function signTx(to, valueWei, nonce) {
+  const res = await fetch(`/api/sign?to=${to}&value=${valueWei}&nonce=${nonce}`);
+  const raw = (await res.text()).trim();
+  if (!raw.startsWith("0x")) throw new Error(raw || "sign failed");
+  return raw;
+}
+
+async function watchReceipt(hash, el) {
+  for (let i = 0; i < 40; i++) {
+    await new Promise((r) => setTimeout(r, 750));
+    let rc = null;
+    try { rc = await rpc("eth_getTransactionReceipt", [hash]); } catch (e) { /* keep polling */ }
+    if (rc) {
+      const blk = hexToNum(rc.blockNumber);
+      const ok = (rc.status === "0x1" || rc.status === 1);
+      markTx(hash, { status: ok ? "ok" : "reverted", block: blk });
+      updateAct(el, { st: ok ? "✓" : "✗", cls: ok ? "ok" : "err", hash, note: ok ? `in block #${blk}` : "reverted" });
+      return;
+    }
+  }
+  updateAct(el, { st: "✗", cls: "err", hash, note: "no receipt (timed out)" });
+}
+
+async function sendOne(to, valueWei, label, nonce) {
+  const el = logAct(label);
+  try {
+    if (nonce == null) nonce = hexToNum(await rpc("eth_getTransactionCount", [FROM, "pending"]));
+    const raw = await signTx(to, valueWei, nonce);
+    const hash = await rpc("eth_sendRawTransaction", [raw]);
+    recordTx(hash, to, valueWei, "transfer");
+    updateAct(el, { hash, note: "pending…" });
+    await watchReceipt(hash, el);
+  } catch (e) {
+    updateAct(el, { st: "✗", cls: "err", note: (e && e.message) ? e.message : "failed" });
+  }
+}
+
+$("send1").addEventListener("click", async () => {
+  if (busy) return; setBusy(true);
+  try { await sendOne(DEV[1], ONE_USDR, "Send 1 USDr → dev #1"); } finally { setBusy(false); }
+});
+
+$("sendrnd").addEventListener("click", async () => {
+  if (busy) return; setBusy(true);
+  const rnd = "0x" + Array.from({ length: 40 }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join("");
+  try { await sendOne(rnd, ONE_USDR, "Send 1 USDr → random " + short(rnd, 4)); } finally { setBusy(false); }
+});
+
+$("send5").addEventListener("click", async () => {
+  if (busy) return; setBusy(true);
+  try {
+    const start = hexToNum(await rpc("eth_getTransactionCount", [FROM, "pending"]));
+    const pending = [];
+    for (let i = 0; i < 5; i++) {
+      const el = logAct(`Burst ${i + 1}/5 → dev #1`);
+      try {
+        const raw = await signTx(DEV[1], ONE_USDR, start + i);
+        const hash = await rpc("eth_sendRawTransaction", [raw]);
+        recordTx(hash, DEV[1], ONE_USDR, "transfer");
+        updateAct(el, { hash, note: "pending…" });
+        pending.push(watchReceipt(hash, el));
+      } catch (e) {
+        updateAct(el, { st: "✗", cls: "err", note: (e && e.message) ? e.message : "failed" });
+      }
+    }
+    await Promise.all(pending);
+  } finally { setBusy(false); }
+});
+
+// Deploy a minimal contract whose runtime returns 42 for any call, then verify via eth_call.
+const TEST_CONTRACT = "0x600a600c600039600a6000f3602a60005260206000f3";
+$("deploy").addEventListener("click", async () => {
+  if (busy) return; setBusy(true);
+  const el = logAct("Deploy test contract");
+  try {
+    const nonce = hexToNum(await rpc("eth_getTransactionCount", [FROM, "pending"]));
+    const res = await fetch(`/api/sign?nonce=${nonce}&value=0&data=${TEST_CONTRACT}`);
+    const raw = (await res.text()).trim();
+    if (!raw.startsWith("0x")) throw new Error(raw || "sign failed");
+    const hash = await rpc("eth_sendRawTransaction", [raw]);
+    recordTx(hash, null, "0x0", "deploy");
+    updateAct(el, { hash, note: "pending…" });
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 750));
+      let rc = null;
+      try { rc = await rpc("eth_getTransactionReceipt", [hash]); } catch (e) { /* keep polling */ }
+      if (rc) {
+        const addr = rc.contractAddress;
+        const ok = (rc.status === "0x1" || rc.status === 1);
+        markTx(hash, { status: ok ? "ok" : "reverted", block: hexToNum(rc.blockNumber), contractAddr: addr });
+        if (!addr) { updateAct(el, { st: "✗", cls: "err", hash, note: "no contract address" }); return; }
+        let ret = "?";
+        try { ret = hexToNum(await rpc("eth_call", [{ to: addr, data: "0x" }, "latest"])); } catch (e) { /* ignore */ }
+        updateAct(el, { st: "✓", cls: "ok", hash, note: `${short(addr, 6)} @ #${hexToNum(rc.blockNumber)} · call()=${ret}` });
+        return;
+      }
+    }
+    updateAct(el, { st: "✗", cls: "err", hash, note: "no receipt (timed out)" });
+  } catch (e) {
+    updateAct(el, { st: "✗", cls: "err", note: (e && e.message) ? e.message : "failed" });
+  } finally { setBusy(false); }
+});
+
+// --- RPC endpoint self-test: call representative methods with LIVE data ----
+const escHtml = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+function rpcPreview(v) {
+  if (v === null || v === undefined) return "null";
+  if (typeof v === "string") return v.length > 44 ? v.slice(0, 44) + "…" : v;
+  if (typeof v === "boolean" || typeof v === "number") return String(v);
+  if (Array.isArray(v)) return "[" + v.length + " item" + (v.length === 1 ? "" : "s") + "]";
+  if (v.number && v.hash) return "block #" + hexToNum(v.number) + " " + short(v.hash);
+  const k = Object.keys(v);
+  return "{ " + k.slice(0, 4).join(", ") + (k.length > 4 ? ", …" : "") + " }";
+}
+
+async function runRpcTests() {
+  const body = $("rpc-results"), sum = $("rpc-summary");
+  body.innerHTML = '<tr><td colspan="3" class="muted" style="padding:12px 14px">gathering live data…</td></tr>';
+  sum.textContent = "";
+  // Derive realistic params from current chain state + the dashboard's own txs.
+  const headHex = await rpc("eth_blockNumber").catch(() => null);
+  const head = headHex || "latest";
+  const block = headHex ? await rpc("eth_getBlockByNumber", [head, false]).catch(() => null) : null;
+  const bHash = block && block.hash;
+  const fromBlk = headHex ? "0x" + Math.max(0, hexToNum(headHex) - 50).toString(16) : "0x0";
+  const mined = myTxs.find((t) => t.block != null);
+  const deployed = myTxs.find((t) => t.kind === "deploy" && t.contractAddr);
+
+  // [label, method, params | null-to-skip, skip-reason]
+  const tests = [
+    ["web3_clientVersion", "web3_clientVersion", []],
+    ["web3_sha3", "web3_sha3", ["0x68656c6c6f"]],
+    ["net_version", "net_version", []],
+    ["net_listening", "net_listening", []],
+    ["net_peerCount", "net_peerCount", []],
+    ["eth_chainId", "eth_chainId", []],
+    ["eth_blockNumber", "eth_blockNumber", []],
+    ["eth_gasPrice", "eth_gasPrice", []],
+    ["eth_maxPriorityFeePerGas", "eth_maxPriorityFeePerGas", []],
+    ["eth_syncing", "eth_syncing", []],
+    ["eth_accounts", "eth_accounts", []],
+    ["eth_feeHistory", "eth_feeHistory", ["0x1", "latest", [25, 75]]],
+    ["eth_getBalance (dev#0)", "eth_getBalance", [FROM, "latest"]],
+    ["eth_getTransactionCount (dev#0)", "eth_getTransactionCount", [FROM, "latest"]],
+    ["eth_getCode (dev#0)", "eth_getCode", [FROM, "latest"]],
+    ["eth_getBlockByNumber (head)", "eth_getBlockByNumber", [head, false]],
+    ["eth_getBlockByHash (head)", "eth_getBlockByHash", bHash ? [bHash, false] : null, "no block yet"],
+    ["eth_getBlockTransactionCountByNumber", "eth_getBlockTransactionCountByNumber", [head]],
+    ["eth_estimateGas (transfer)", "eth_estimateGas", [{ from: FROM, to: DEV[1], value: "0x1" }]],
+    ["eth_call (dev#0)", "eth_call", [{ to: FROM, data: "0x" }, "latest"]],
+    ["eth_getLogs (last 50 blk)", "eth_getLogs", [{ fromBlock: fromBlk, toBlock: "latest" }]],
+    ["eth_getTransactionByHash", "eth_getTransactionByHash", mined ? [mined.hash] : null, "send a tx first"],
+    ["eth_getTransactionReceipt", "eth_getTransactionReceipt", mined ? [mined.hash] : null, "send a tx first"],
+    ["eth_call (contract → 42)", "eth_call", deployed ? [{ to: deployed.contractAddr, data: "0x" }, "latest"] : null, "deploy a contract first"],
+    ["rayls_nodeStatus", "rayls_nodeStatus", []],
+    ["rayls_latestHeader", "rayls_latestHeader", []],
+    ["rayls_genesis", "rayls_genesis", []],
+  ];
+
+  body.innerHTML = "";
+  let pass = 0, fail = 0, skip = 0;
+  for (const [label, method, params, why] of tests) {
+    const tr = document.createElement("tr");
+    body.appendChild(tr);
+    if (params == null) {
+      skip++;
+      tr.innerHTML = `<td class="mono">${label}</td><td class="muted">skip</td><td class="muted">${escHtml(why || "no live data")}</td>`;
+      continue;
+    }
+    tr.innerHTML = `<td class="mono">${label}</td><td class="muted">…</td><td></td>`;
+    try {
+      const res = await rpc(method, params);
+      pass++;
+      tr.innerHTML = `<td class="mono">${label}</td><td style="color:var(--green)">✓</td><td class="mono muted">${escHtml(rpcPreview(res))}</td>`;
+    } catch (e) {
+      fail++;
+      const msg = (e && e.message) ? e.message : "error";
+      tr.innerHTML = `<td class="mono">${label}</td><td style="color:var(--red)">✗</td><td class="mono" style="color:var(--red)">${escHtml(msg.slice(0, 90))}</td>`;
+    }
+  }
+  sum.textContent = `${pass} ok · ${fail} failed${skip ? " · " + skip + " skipped" : ""}`;
+}
+
+$("rpctest").addEventListener("click", async () => {
+  const b = $("rpctest");
+  b.disabled = true;
+  try { await runRpcTests(); } finally { b.disabled = false; }
+});
+
+// --- Transaction details: click a row in the tx feed to inspect it ---------
+async function showTxDetails(hash) {
+  const panel = $("txdetail"), title = $("txdetail-hash");
+  title.textContent = short(hash, 10);
+  // highlight the selected row in the feed
+  document.querySelectorAll("#txs tr.selected").forEach((r) => r.classList.remove("selected"));
+  const selRow = document.querySelector(`#txs tr[data-hash="${hash}"]`);
+  if (selRow) selRow.classList.add("selected");
+  panel.innerHTML = '<tr><td colspan="2" class="muted" style="padding:10px 14px">loading…</td></tr>';
+  $("txdetail-panel").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  let tx = null, rc = null;
+  try { tx = await rpc("eth_getTransactionByHash", [hash]); } catch (e) { /* ignore */ }
+  try { rc = await rpc("eth_getTransactionReceipt", [hash]); } catch (e) { /* ignore */ }
+  const tracked = myTxs.find((t) => t.hash === hash);
+  if (!tx && !rc && !tracked) { panel.innerHTML = '<tr><td colspan="2" class="empty">transaction not found</td></tr>'; return; }
+
+  const rows = [];
+  // add(key, displayValue, copyValue?) — when copyValue is set the cell is click-to-copy
+  const add = (k, v, copy) => { if (v !== null && v !== undefined && v !== "") rows.push([k, String(v), copy || null]); };
+  const gwei = (h) => (hexToNum(h) / 1e9).toFixed(4) + " gwei";
+  const named = (a) => acctName[String(a).toLowerCase()] ? a + "  (" + acctName[String(a).toLowerCase()] + ")" : a;
+  add("Hash", hash, hash);
+  add("Status", rc ? (rc.status === "0x1" ? "✓ success" : "✗ reverted") : (tx ? "⏳ pending" : (tracked ? tracked.status : "unknown")));
+  const blk = (tx && tx.blockNumber) || (rc && rc.blockNumber);
+  add("Block", blk != null ? "#" + hexToNum(blk) : (tracked && tracked.block != null ? "#" + tracked.block : "pending"));
+  const from = (tx && tx.from) || (tracked && tracked.from);
+  add("From", from ? named(from) : null, from);
+  const contract = rc && rc.contractAddress;
+  const to = (tx && tx.to) || (tracked && tracked.to);
+  if (contract) add("To", "(contract creation)");
+  else add("To", to ? named(to) : "(contract creation)", to);
+  add("Value", fmtEther((tx && tx.value) || (tracked && tracked.value) || "0x0") + " USDr");
+  if (tx) {
+    add("Nonce", hexToNum(tx.nonce));
+    add("Gas limit", hexToNum(tx.gas).toLocaleString());
+    if (tx.gasPrice) add("Gas price", gwei(tx.gasPrice));
+    if (tx.maxFeePerGas) add("Max fee / gas", gwei(tx.maxFeePerGas));
+    add("Tx type", tx.type);
+  }
+  if (rc) {
+    add("Gas used", hexToNum(rc.gasUsed).toLocaleString());
+    add("Logs", rc.logs ? rc.logs.length : 0);
+    if (contract) {
+      add("Contract", named(contract), contract);
+      try { add("call() →", hexToNum(await rpc("eth_call", [{ to: contract, data: "0x" }, "latest"]))); } catch (e) { /* ignore */ }
+    }
+  }
+  if (tx && tx.input && tx.input !== "0x") add("Input", tx.input.length > 74 ? tx.input.slice(0, 74) + "…" : tx.input, tx.input);
+  panel.innerHTML = rows.map(([k, v, copy]) =>
+    `<tr><td class="muted" style="white-space:nowrap;width:120px;vertical-align:top">${escHtml(k)}</td>` +
+    `<td class="mono${copy ? " copyable" : ""}"${copy ? ` data-copy="${escHtml(copy)}" title="click to copy"` : ""} style="word-break:break-all">${escHtml(v)}</td></tr>`).join("");
+}
+// Event delegation: rows are re-rendered, but these listeners on the persistent tbodies stay.
+$("txs").addEventListener("click", (e) => {
+  const tr = e.target.closest("tr[data-hash]");
+  if (tr && tr.dataset.hash) showTxDetails(tr.dataset.hash);
+});
+$("txdetail").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-copy]");
+  if (c) copyText(c.getAttribute("data-copy"));
+});
+$("clear-txs").addEventListener("click", () => {
+  myTxs = []; saveTxs(); renderTxFeed(); renderStats();
+  $("txdetail").innerHTML = '<tr><td colspan="2" class="empty">click a transaction in “Recent transactions” above to see its full details</td></tr>';
+  $("txdetail-hash").textContent = "";
+  toast("Cleared tracked transactions");
+});
+
+renderTxFeed();   // show persisted txs immediately, before the first poll completes
+poll();
+setInterval(poll, 1500);
+</script>
+</body>
+</html>

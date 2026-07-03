@@ -1,0 +1,108 @@
+//! Messages sent between workers.
+
+use rayls_consensus_network::{PeerExchangeMap, RLMessage};
+use rayls_infrastructure_types::{Batch, BlockHash, SealedBatch};
+use serde::{Deserialize, Serialize};
+
+/// Worker messages on the gossip network.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum WorkerGossip {
+    /// A new is available.
+    Batch(BlockHash),
+    /// Transaction- published so a committee member can include in a batch.
+    Txn(Vec<Vec<u8>>),
+}
+
+// impl RLMessage trait for types
+impl RLMessage for WorkerRequest {
+    fn peer_exchange_msg(&self) -> Option<PeerExchangeMap> {
+        match self {
+            Self::PeerExchange { peers } => Some(peers.clone()),
+            _ => None,
+        }
+    }
+}
+impl RLMessage for WorkerResponse {
+    fn peer_exchange_msg(&self) -> Option<PeerExchangeMap> {
+        None
+    }
+}
+
+/// Requests from Worker.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum WorkerRequest {
+    /// Send a new batch to a peer.
+    ReportBatch {
+        /// The sealed batch that this worker is reporting.
+        sealed_batch: SealedBatch,
+    },
+    /// Request batches by digest from a peer.
+    RequestBatches {
+        /// The requests batches by digests.
+        batch_digests: Vec<BlockHash>,
+        /// Maximum expected response size.
+        max_response_size: usize,
+    },
+    /// Exchange peer information.
+    ///
+    /// This "request" is sent to peers when this node disconnects
+    /// due to excess peers. The peer exchange is intended to support
+    /// discovery.
+    PeerExchange {
+        /// The peer information being exchanged.
+        peers: PeerExchangeMap,
+    },
+}
+
+impl From<PeerExchangeMap> for WorkerRequest {
+    fn from(value: PeerExchangeMap) -> Self {
+        Self::PeerExchange { peers: value }
+    }
+}
+
+//
+//
+//=== Response types
+//
+//
+
+/// Response to worker requests.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum WorkerResponse {
+    /// Status 200 response when a peer accepts a proposed batch.
+    ReportBatch,
+    /// Provided the requested batches.
+    RequestBatches(Vec<Batch>),
+    /// Exchange peer information.
+    PeerExchange {
+        /// The peer information being exchanged.
+        peers: PeerExchangeMap,
+    },
+    /// RPC error while handling request.
+    ///
+    /// This is an application-layer error response.
+    Error(WorkerRPCError),
+}
+
+impl WorkerResponse {
+    /// Helper method if the response is an error.
+    pub fn is_err(&self) -> bool {
+        matches!(self, WorkerResponse::Error(_))
+    }
+}
+
+impl From<WorkerRPCError> for WorkerResponse {
+    fn from(value: WorkerRPCError) -> Self {
+        Self::Error(value)
+    }
+}
+
+/// Application-specific error type while handling Worker request.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct WorkerRPCError(pub String);
+
+impl From<PeerExchangeMap> for WorkerResponse {
+    fn from(value: PeerExchangeMap) -> Self {
+        Self::PeerExchange { peers: value }
+    }
+}

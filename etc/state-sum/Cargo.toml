@@ -1,0 +1,26 @@
+[package]
+name = "state-sum"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Audit tool: sum native (USDR) balances and read the stored totalSupply slot from a reth datadir snapshot."
+
+# Standalone workspace — intentionally NOT a member of the main axyl workspace,
+# so this audit tool can be built and reviewed in isolation.
+[workspace]
+
+[dependencies]
+reth-db = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-db-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+alloy-primitives = { version = "1", features = ["map"] }
+eyre = "0.6"
+# Event-replay phase: HTTP client and JSON parsing for the Blockscout API,
+# plus a small regex-based scan of the alloc block in the mainnet genesis YAML.
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"
+regex = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

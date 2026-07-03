@@ -1,0 +1,42 @@
+[package]
+name = "rayls-infrastructure-storage"
+version.workspace = true
+edition = "2021"
+license = "BUSL-1.1"
+authors = [
+]
+publish = false
+
+[dependencies]
+rayls-infrastructure-utils.workspace = true
+tracing.workspace = true
+rayls-infrastructure-types = { workspace = true }
+eyre = { workspace = true }
+prometheus = { workspace = true }
+ouroboros = { workspace = true }
+parking_lot = { workspace = true }
+# For the persist async implemetation.
+tokio = { workspace = true, features = [ "sync" ] }
+
+# redb backend
+redb = { version = "2.1.1", optional = false }
+
+# mdbx backend- default
+reth-libmdbx = { workspace = true, optional = true, features = [
+    "return-borrowed",
+    "read-tx-timeouts",
+] }
+page_size = { version = "0.6.0", optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[features]
+redb = []
+reth-libmdbx = ["dep:reth-libmdbx", "dep:page_size"]
+default = ["reth-libmdbx"]
+archive-replay = []
+
+[lints]
+workspace = true

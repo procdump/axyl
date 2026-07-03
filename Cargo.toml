@@ -1,0 +1,287 @@
+[workspace]
+members = [
+    # common
+    "bin/rayls-network",
+    "bin/rayls-replay",
+
+    # consensus
+    "crates/consensus/state-sync",
+    "crates/consensus/network",
+    "crates/consensus/consensus-metrics",
+    "crates/consensus/primary",
+    "crates/consensus/worker",
+    "crates/consensus/primary-metrics",
+    "crates/consensus/worker/src/batch-builder",
+    "crates/consensus/worker/src/batch-validator",
+
+    # middleware
+    "crates/middleware/bridge",
+    "crates/middleware/processor",
+    "crates/middleware/orchestrator",
+    "crates/middleware/rewards",
+
+    # execution
+    "crates/execution/evm",
+    "crates/execution/execution-metrics",
+    "crates/execution/faucet",
+    "crates/execution/rpc",
+
+    # infrastructure
+    "crates/infrastructure/utils",
+    "crates/infrastructure/network-types",
+    "crates/infrastructure/types",
+    "crates/infrastructure/config",
+    "crates/infrastructure/storage",
+    "crates/infrastructure/network-cli",
+
+    # testing
+    "crates/testing/test-utils",
+    "crates/testing/test-utils-committee",
+    "crates/testing/e2e-tests",
+    "crates/testing/chaos-framework",
+
+]
+
+# Excluded because the cargo-fuzz harnesses in fuzz/ manage their own
+# `Cargo.toml`/`Cargo.lock` (isolated workspace at `crates/testing/fuzz-targets/fuzz/`).
+# The parent `crates/testing/fuzz-targets/Cargo.toml` exists as a doc/helper
+# crate and is intentionally kept outside the workspace.
+exclude = ["crates/testing/fuzz-targets"]
+
+# Explicitly set the resolver to version 2, which is the default for packages with edition >= 2021
+# https://doc.rust-lang.org/edition-guide/rust-2021/default-cargo-resolver.html
+resolver = "2"
+
+[workspace.package]
+version = "1.2.1"
+edition = "2021"
+# Remember to update:
+# - .clippy.toml
+# - README.md
+# - Dockerfile
+# - rust-toolchain.toml
+rust-version = "1.91" # see note
+license = "BUSL-1.1"
+homepage = ""
+repository = ""
+authors = [
+]
+description = "Rayls Network protocol."
+exclude = [".github/"]
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+missing_docs = "allow"
+unreachable_pub = "warn"
+unused_crate_dependencies = "warn"
+unused_must_use = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 } # includes unused_crate_dependencies
+
+[workspace.lints.rustdoc]
+all = "warn"
+
+[workspace.dependencies]
+# misc
+clap = "4.5"
+eyre = "0.6"
+futures = "0.3"
+tokio = { version = "1.44", default-features = false }
+tracing = { version = "0.1.0", features = ["release_max_level_info"] }
+tracing-appender = "0.2"
+tracing-subscriber = "0.3.20"
+metrics = "0.23.0"                                     # Needed for `metrics-macro` to resolve the crate using `::metrics` notation
+serde_json = "1.0.94"
+humantime-serde = "1.1"
+fdlimit = "0.3.0"
+snap = "1.1.1"
+rayon = "1.7"
+crossbeam-channel = "0.5"
+
+# crypto
+secp256k1 = { version = "0.31", default-features = false, features = [
+    "global-context",
+    "rand",
+    "recovery",
+] }
+
+rpassword = "7.4.0"
+
+# execution
+reth = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-chain-state = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-config = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-db = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-storage-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-trie = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-trie-db = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-trie-parallel = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-db-common = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-db-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-engine-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-engine-tree = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-network = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-network-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-network-peers = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-execution-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-revm = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-rpc = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-tracing = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-provider = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0", features = ["rocksdb"] }
+reth-tasks = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-consensus = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-node-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-node-core = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-node-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-node-metrics = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-discv4 = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-eth-wire = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-cli-util = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-errors = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-libmdbx = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-stages = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0", features=["rocksdb"] }
+reth-downloaders = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-static-file = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-prune = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-prune-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-exex-types = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-stages-api = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+reth-tokio-util = { git = "https://github.com/paradigmxyz/reth", tag = "v1.11.0" }
+
+# eth
+alloy = { version = "1.4.3", features = ["full"] }
+alloy-rlp = "0.3.10"
+alloy-evm = { version = "0.27.2" }
+alloy-hardforks = "0.4.5"
+
+futures-util = "0.3.25"
+jsonrpsee = { version = "0.26.0" }
+jsonrpsee-types = { version = "0.26.0" }
+assert_matches = { version = "1.5.0" }
+serial_test = "3.2.0"
+
+# execution
+rayls-execution-evm = { path = "./crates/execution/evm" }
+rayls-execution-metrics = { path = "./crates/execution/execution-metrics" }
+rayls-execution-rpc = { path = "./crates/execution/rpc" }
+rayls-execution-faucet = { path = "./crates/execution/faucet" }
+
+# middleware
+rayls-middleware-orchestrator = { path = "./crates/middleware/orchestrator" }
+rayls-middleware-bridge = { path = "./crates/middleware/bridge" }
+rayls-middleware-processor = { path = "crates/middleware/processor" }
+rayls-middleware-rewards = { path = "./crates/middleware/rewards" }
+
+# consensus
+rayls-batch-builder = { path = "crates/consensus/worker/src/batch-builder" }
+rayls-batch-validator = { path = "crates/consensus/worker/src/batch-validator" }
+rayls-consensus-network = { path = "./crates/consensus/network" }
+rayls-consensus-state-sync = { path = "./crates/consensus/state-sync" }
+rayls-consensus-worker = { path = "./crates/consensus/worker" }
+rayls-consensus-primary = { path = "./crates/consensus/primary" }
+rayls-testing-test-utils = { path = "./crates/testing/test-utils" }
+rayls-testing-test-utils-committee = { path = "./crates/testing/test-utils-committee" }
+consensus-metrics = { path = "./crates/consensus/consensus-metrics" }
+rayls-consensus-primary-metrics = { path = "./crates/consensus/primary-metrics" }
+
+# infrastructure
+rayls-infrastructure-utils = { path = "./crates/infrastructure/utils" }
+rayls-infrastructure-network-types = { path = "./crates/infrastructure/network-types" }
+rayls-infrastructure-types = { path = "./crates/infrastructure/types" }
+rayls-infrastructure-config = { path = "./crates/infrastructure/config" }
+rayls-infrastructure-storage = { path = "./crates/infrastructure/storage" }
+rayls-network-cli = { path = "./crates/infrastructure/network-cli" }
+
+e2e-tests = { path = "./crates/testing/e2e-tests" }
+
+# misc
+match_opt = "0.1.2"
+serde = { version = "^1.0", features = ["derive", "rc"] }
+serde_repr = "0.1"
+rand = "0.9"
+rand_chacha = "0.9"
+thiserror = "1.0.50"
+tempfile = "3.3.0"
+bcs = "0.1.4"
+bincode = "1.3.3"
+proptest = "1.5.0"
+proptest-derive = "0.4"
+serde-reflection = "0.3.6"
+indexmap = { version = "2.5.0", features = ["serde"] }
+once_cell = "1.18.0"
+prometheus = { version = "0.13.4", default-features = false }
+tonic = { version = "0.13" }
+async-trait = "0.1.61"
+dashmap = "6.0.1"
+parking_lot = "0.12.3"
+scopeguard = "1.1"
+uuid = { version = "1.1.2", features = ["v4", "fast-rng"] }
+quinn-proto = "0.11.8"
+derive_builder = "0.12.0"
+roaring = "0.10.1"
+serde_with = { version = "2.1.0", features = ["hex"] }
+ouroboros = "0.17"
+proc-macro2 = "1.0.47"
+uint = "0.10"
+cfg-if = "1.0.0"
+lru = "0.10"
+tokio-stream = { version = "0.1.14", features = ["sync", "net"] }
+serde_yaml = "0.8.26"
+byteorder = "1.4.3"
+rustversion = "1.0.9"
+bytes = "1.4.0"
+humantime = "2.1.0"
+blst = "0.3.14"
+hex = "0.4.3"
+dirs-next = "2.0.0"
+escargot = "0.5"
+ethereum-tx-sign = "6.1.3"
+const-hex = "1.12.0"
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+] }
+# Consensus-relevant: used by batch-validator slot dispatch under the
+# TransactionLoadBalancing hardfork. Do NOT bump without coordinating a network
+# upgrade or moving the hash behind a hardfork gate first.
+rustc-hash = "=2.1.2"
+
+# consensus metrics
+axum = { version = "0.8.6", default-features = false }
+# healthcheck
+http = { version = "1.3.1" }
+
+backoff = { version = "0.4.0", features = [
+    "futures",
+    "futures-core",
+    "pin-project-lite",
+    "tokio",
+    "tokio_1",
+] }
+
+# patch from v0.55
+libp2p = { version = "0.56.0" }
+bs58 = { version = "0.5.1" }
+blake3 = { version = "1.8.2" }
+
+[profile.release]
+panic = "abort"
+overflow-checks = true
+
+# preserve default wrapping behavior for third-party crates
+[profile.release.package."*"]
+overflow-checks = false
+
+[profile.profiling]
+inherits = "release"
+debug = true

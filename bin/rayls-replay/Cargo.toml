@@ -1,0 +1,37 @@
+[package]
+name = "rayls-replay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "BUSL-1.1"
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Scripted historical replay from a Rayls snapshot into a fresh archive datadir."
+
+[[bin]]
+name = "rayls-replay"
+path = "src/main.rs"
+
+[dependencies]
+rayls-execution-evm = { workspace = true, features = ["archive-replay"] }
+rayls-infrastructure-config = { workspace = true }
+rayls-infrastructure-storage = { workspace = true, features = ["archive-replay"] }
+rayls-infrastructure-types = { workspace = true, features = ["cli"] }
+
+clap = { workspace = true, features = ["derive"] }
+eyre = { workspace = true }
+parking_lot = { workspace = true }
+reth-chainspec = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+rand = { workspace = true }

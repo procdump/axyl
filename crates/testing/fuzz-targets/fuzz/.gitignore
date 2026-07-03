@@ -1,0 +1,5 @@
+# cargo-fuzz generated artifacts — not source, do not commit.
+/target/
+/corpus/
+/artifacts/
+/coverage/

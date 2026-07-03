@@ -1,0 +1,16 @@
+[package]
+name = "rayls-consensus-primary-metrics"
+version.workspace = true
+authors = [
+]
+license = "BUSL-1.1"
+publish = false
+edition = "2021"
+
+[dependencies]
+prometheus = { workspace = true }
+tracing = { workspace = true }
+consensus-metrics = { workspace = true }
+
+[lints]
+workspace = true

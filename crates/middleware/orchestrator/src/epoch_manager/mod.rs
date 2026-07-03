@@ -1,0 +1,28 @@
+mod batches;
+mod consensus;
+mod core;
+mod engine;
+mod network;
+mod primary;
+mod state;
+mod transition;
+mod types;
+mod utils;
+mod worker;
+
+pub use utils::catchup_accumulator;
+pub(crate) use utils::open_consensus_db;
+
+pub(crate) use types::*;
+
+#[cfg(test)]
+pub(crate) use core::{await_execution_replay, ReplayWaitOutcome};
+
+#[cfg(test)]
+pub(crate) use network::{decide_node_mode, node_has_local_history};
+
+#[cfg(test)]
+pub(crate) use state::resolve_local_prev_epoch_record;
+
+#[cfg(test)]
+pub(crate) use transition::select_recovery_checkpoint;

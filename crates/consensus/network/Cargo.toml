@@ -1,0 +1,51 @@
+[package]
+name = "rayls-consensus-network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[dependencies]
+libp2p = { workspace = true, features = [
+    "request-response",
+    "gossipsub",
+    "tokio",
+    "quic",
+    "macros",
+    "kad",
+] }
+tokio = { workspace = true, features = ["rt", "net", "sync", "macros", "time"] }
+rayls-infrastructure-types = { workspace = true }
+rayls-infrastructure-config = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+rayls-infrastructure-storage = { workspace = true }
+bs58 = { workspace = true }
+prometheus = { workspace = true }
+
+# req/res requires async_trait
+async-trait = { workspace = true }
+bcs = { workspace = true }
+snap = { workspace = true }
+
+# peer manager
+rand = { workspace = true }
+serde_with = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rayls-execution-evm = { workspace = true, features = ["test-utils"] }
+eyre = { workspace = true }
+assert_matches = { workspace = true }
+rayls-infrastructure-storage = { workspace = true }
+rayls-testing-test-utils = { workspace = true }
+rayls-infrastructure-types = { workspace = true, features = ["test-utils"] }
+rayls-infrastructure-config = { workspace = true, features = ["test-utils"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,358 @@
+//! Cryptographic keys used by the node.
+
+use crate::{RaylsDirs, BLS_WRAPPED_KEYFILE, PRIMARY_NETWORK_SEED_FILE, WORKER_NETWORK_SEED_FILE};
+use aes_gcm_siv::{aead::Aead as _, Aes256GcmSiv, Key, KeyInit, Nonce};
+use pbkdf2::pbkdf2_hmac;
+use rand::{rngs::StdRng, Rng as _, SeedableRng};
+use rayls_infrastructure_types::{
+    construct_proof_of_possession_message, Address, BlsKeypair, BlsPublicKey, BlsSignature,
+    BlsSigner, DefaultHashFunction, NetworkKeypair, NetworkPublicKey, ProtocolSignature as _,
+    Signer,
+};
+use sha2::Sha256;
+use std::sync::Arc;
+
+/// The work factor for PBKDF2 is implemented through an iteration count, which is based on the
+/// internal hashing algorithm used. HMAC-SHA-256 is widely supported and is recommended by NIST.
+/// OWASP recommends 600,000 iterations for PBKDF2-HMAC-SHA256.
+#[cfg(not(feature = "test-utils"))]
+const PBKDF2_HMAC_ROUNDS: u32 = 1_000_000;
+// prevent excessive delays during testing
+#[cfg(feature = "test-utils")]
+const PBKDF2_HMAC_ROUNDS: u32 = 1;
+
+/// Legacy round counts still accepted when decrypting, so keystores written by builds that
+/// used a weaker count (notably 1-round `test-utils` builds) remain readable. Trying multiple
+/// counts is safe: only the count used to encrypt passes the AES-GCM-SIV authentication tag.
+/// New keystores are always wrapped with [`PBKDF2_HMAC_ROUNDS`].
+const PBKDF2_LEGACY_HMAC_ROUNDS: &[u32] = &[1];
+
+#[derive(Debug)]
+struct KeyConfigInner {
+    // DO NOT expose the private key to other code.  Tests that need this will provide a primary
+    // key. Use the BlsSigner trait for signing for the primary.
+    primary_keypair: BlsKeypair,
+    // Derived from the primary_keypair.
+    primary_network_keypair: NetworkKeypair,
+    // Derived from the primary_keypair.
+    worker_network_keypair: NetworkKeypair,
+}
+
+/// Basic implementation of a key manager.  This version will read a BLS key
+/// from a file (which is not ideal).  It is intended to be an interface that
+/// can later expand to be backed with something more secure (like an HSM).
+/// It should NOT expose the BLS private key, even though it is currently read
+/// from a file this will not always be the case and all code needing signatures
+/// MUST go through KeyConfig.
+/// NOTE: The two network keys (primary and worker) are derived from the BLS key
+/// and are exposed to other code.  This is required to work with libp2p which
+/// wants the actual private key.  This method of deriving the key is an attempt
+/// to provide some protection to the key- even though it will exist in memory it
+/// does NOT need to be stored on disk or otherwise saved.
+#[derive(Debug, Clone)]
+pub struct KeyConfig {
+    inner: Arc<KeyConfigInner>,
+}
+
+impl KeyConfig {
+    /// Wrap (encrypt) a BLS key with passphrase.
+    /// Returns a String that is the Base58 encoding of the encrypted bytes.
+    /// bytes 0-11 are the pbkdf2 salt, 12-23 are the aes-gcm-siv nonce and 24.. are the encrypted
+    /// key.
+    fn wrap_bls_key(primary_keypair: &BlsKeypair, passphrase: &str) -> eyre::Result<String> {
+        Self::wrap_bls_key_with_rounds(primary_keypair, passphrase, PBKDF2_HMAC_ROUNDS)
+    }
+
+    /// Same as [`Self::wrap_bls_key`] but with an explicit PBKDF2 round count, so tests can
+    /// produce keystores wrapped with legacy counts.
+    fn wrap_bls_key_with_rounds(
+        primary_keypair: &BlsKeypair,
+        passphrase: &str,
+        rounds: u32,
+    ) -> eyre::Result<String> {
+        let mut salt = [0_u8; 12];
+        rand::rng().fill(&mut salt);
+        let mut nonce_bytes = [0_u8; 12];
+        rand::rng().fill(&mut nonce_bytes);
+        let mut passphrase_bytes = [0_u8; 32];
+        pbkdf2_hmac::<Sha256>(passphrase.as_bytes(), &salt, rounds, &mut passphrase_bytes);
+        let key = Key::<Aes256GcmSiv>::from_slice(&passphrase_bytes);
+        let cipher = Aes256GcmSiv::new(key);
+        let nonce = Nonce::from_slice(&nonce_bytes); // 96-bits
+        let ciphertext = cipher
+            .encrypt(nonce, &primary_keypair.to_bytes()[..])
+            .map_err(|e| eyre::eyre!("Could not encrypt BLS key: {e}"))?;
+        let encrypted_data = [&salt[..], &nonce_bytes[..], &ciphertext[..]].concat();
+        Ok(bs58::encode(&encrypted_data).into_string())
+    }
+
+    /// Accepts bytes that are a wrapped BLS key and unwraps with the passphrase.
+    /// bytes 0-11 are the pbkdf2 salt, 12-23 are the aes-gcm-siv nonce and 24.. are the encrypted
+    /// key.
+    /// Decryption is attempted with [`PBKDF2_HMAC_ROUNDS`] first, then with each count in
+    /// [`PBKDF2_LEGACY_HMAC_ROUNDS`], so keystores written by older builds remain readable.
+    fn unwrap_bls_key(bytes: &[u8], passphrase: &str) -> eyre::Result<BlsKeypair> {
+        if bytes.len() < 24 {
+            return Err(eyre::eyre!("Could not decrypt BLS key: invalid keystore"));
+        }
+        let salt = &bytes[0..12];
+        let nonce = Nonce::from_slice(&bytes[12..24]); // 96-bits
+        let mut passphrase_bytes = [0_u8; 32];
+        for &rounds in [PBKDF2_HMAC_ROUNDS].iter().chain(PBKDF2_LEGACY_HMAC_ROUNDS) {
+            pbkdf2_hmac::<Sha256>(passphrase.as_bytes(), salt, rounds, &mut passphrase_bytes);
+            let key = Key::<Aes256GcmSiv>::from_slice(&passphrase_bytes);
+            let cipher = Aes256GcmSiv::new(key);
+            if let Ok(plaintext) = cipher.decrypt(nonce, &bytes[24..]) {
+                return BlsKeypair::from_bytes(&plaintext);
+            }
+        }
+        Err(eyre::eyre!("Could not decrypt BLS key: invalid passphrase or unsupported keystore"))
+    }
+
+    /// Read a key config file that contains the primary BLS key in Base 58 format.
+    pub fn read_config<RLD: RaylsDirs>(
+        rayls_datadir: &RLD,
+        passphrase: String,
+    ) -> eyre::Result<Self> {
+        // load keys to start the primary
+        let keyfile_contents =
+            std::fs::read_to_string(rayls_datadir.node_keys_path().join(BLS_WRAPPED_KEYFILE))?;
+        let bytes = bs58::decode(keyfile_contents.as_str().trim()).into_vec()?;
+        let validator_keypath = rayls_datadir.node_keys_path();
+        tracing::info!(target: "rayls::consensus_config", "loading validator keys at {:?}", validator_keypath);
+        let primary_seed =
+            std::fs::read_to_string(rayls_datadir.node_keys_path().join(PRIMARY_NETWORK_SEED_FILE))
+                .unwrap_or_else(|_| "primary network keypair".to_string());
+        let worker_seed =
+            std::fs::read_to_string(rayls_datadir.node_keys_path().join(WORKER_NETWORK_SEED_FILE))
+                .unwrap_or_else(|_| "worker network keypair".to_string());
+        let primary_keypair = Self::unwrap_bls_key(&bytes, &passphrase)?;
+        let primary_network_keypair =
+            Self::generate_network_keypair(&primary_keypair, &primary_seed);
+        let worker_network_keypair = Self::generate_network_keypair(&primary_keypair, &worker_seed);
+        Ok(Self {
+            inner: Arc::new(KeyConfigInner {
+                primary_keypair,
+                primary_network_keypair,
+                worker_network_keypair,
+            }),
+        })
+    }
+
+    /// Generate a new random primary BLS key and save to the config file.
+    /// Note, this is not very secure in that it is writing the private key to a file...
+    pub fn generate_and_save<RLD: RaylsDirs>(
+        rayls_datadir: &RLD,
+        passphrase: String,
+    ) -> eyre::Result<Self> {
+        if passphrase.is_empty() {
+            return Err(eyre::eyre!("Empty password."));
+        }
+        // note: StdRng uses ChaCha12
+        let primary_keypair = BlsKeypair::generate(&mut StdRng::from_os_rng());
+        let primary_seed = "primary network keypair";
+        let worker_seed = "worker network keypair";
+        let primary_network_keypair =
+            Self::generate_network_keypair(&primary_keypair, primary_seed);
+        let worker_network_keypair = Self::generate_network_keypair(&primary_keypair, worker_seed);
+        // Make sure we have the validator dir.
+        // Don't error out if path exists.
+        let _ = std::fs::create_dir(rayls_datadir.node_keys_path());
+        let contents = Self::wrap_bls_key(&primary_keypair, &passphrase)?;
+        std::fs::write(rayls_datadir.node_keys_path().join(BLS_WRAPPED_KEYFILE), contents)?;
+        std::fs::write(
+            rayls_datadir.node_keys_path().join(PRIMARY_NETWORK_SEED_FILE),
+            primary_seed,
+        )?;
+        std::fs::write(rayls_datadir.node_keys_path().join(WORKER_NETWORK_SEED_FILE), worker_seed)?;
+        Ok(Self {
+            inner: Arc::new(KeyConfigInner {
+                primary_keypair,
+                primary_network_keypair,
+                worker_network_keypair,
+            }),
+        })
+    }
+
+    /// Re-encrypt the on-disk BLS keystore with a new passphrase. The key itself is unchanged,
+    /// so the node identity and the derived network keys stay the same.
+    pub fn rotate_passphrase<RLD: RaylsDirs>(
+        rayls_datadir: &RLD,
+        old_passphrase: &str,
+        new_passphrase: &str,
+    ) -> eyre::Result<()> {
+        if new_passphrase.is_empty() {
+            return Err(eyre::eyre!("Empty password."));
+        }
+        let keyfile = rayls_datadir.node_keys_path().join(BLS_WRAPPED_KEYFILE);
+        let contents = std::fs::read_to_string(&keyfile)?;
+        let bytes = bs58::decode(contents.as_str().trim()).into_vec()?;
+        let primary_keypair = Self::unwrap_bls_key(&bytes, old_passphrase)?;
+        let rewrapped = Self::wrap_bls_key(&primary_keypair, new_passphrase)?;
+        // Write to a temp file and rename so an interruption can't leave a torn keystore.
+        let tmp = keyfile.with_extension("kw.tmp");
+        std::fs::write(&tmp, rewrapped)?;
+        // Carry over the original keystore's permissions so the rename can't widen access to the
+        // key.
+        std::fs::set_permissions(&tmp, std::fs::metadata(&keyfile)?.permissions())?;
+        std::fs::rename(&tmp, &keyfile)?;
+        Ok(())
+    }
+
+    /// Create a config with a provided key- this is ONLY for testing.
+    pub fn new_with_testing_key(primary_keypair: BlsKeypair) -> Self {
+        let primary_network_keypair =
+            Self::generate_network_keypair(&primary_keypair, "primary network keypair");
+        let worker_network_keypair =
+            Self::generate_network_keypair(&primary_keypair, "worker network keypair");
+        Self {
+            inner: Arc::new(KeyConfigInner {
+                primary_keypair,
+                primary_network_keypair,
+                worker_network_keypair,
+            }),
+        }
+    }
+
+    /// Provide the primaries public key.
+    pub fn primary_public_key(&self) -> BlsPublicKey {
+        *self.inner.primary_keypair.public()
+    }
+
+    /// Provide the keypair (with private key) for the network.
+    /// Allows building the libp2p network.
+    pub fn primary_network_keypair(&self) -> &NetworkKeypair {
+        &self.inner.primary_network_keypair
+    }
+
+    /// The [NetworkPublicKey] for the primary network.
+    pub fn primary_network_public_key(&self) -> NetworkPublicKey {
+        self.primary_network_keypair().public().clone().into()
+    }
+
+    /// Provide the keypair (with private key) for the worker network.
+    /// Allows building the libp2p worker network.
+    pub fn worker_network_keypair(&self) -> &NetworkKeypair {
+        &self.inner.worker_network_keypair
+    }
+
+    /// The [NetworkPublicKey] for the worker network.
+    pub fn worker_network_public_key(&self) -> NetworkPublicKey {
+        self.worker_network_keypair().public().into()
+    }
+
+    /// Creates a proof that the authority account address is owned by the
+    /// holder of authority protocol key, and also ensures that the authority
+    /// protocol public key exists.
+    ///
+    /// The proof of possession is a [BlsSignature] committed over the intent message
+    /// `intent || message` (See more at [IntentMessage] and [Intent]).
+    /// The message is constructed as: EIP2537([BlsPublicKey]) || [Address].
+    /// Where the public key is uncompressed with G2 point coordinates padded to 64-byte EVM words
+    pub fn generate_proof_of_possession_bls(
+        &self,
+        address: &Address,
+    ) -> eyre::Result<BlsSignature> {
+        let msg = construct_proof_of_possession_message(&self.primary_public_key(), address)?;
+        let sig = BlsSignature::new_secure(&msg.clone(), &self.inner.primary_keypair);
+
+        Ok(sig)
+    }
+
+    /// Derive a NetworkKeypair from a BLS signature, seed string and [DefaultHashFunction].
+    /// This is deterministic for a given keypair and seed_str.
+    fn generate_network_keypair(primary_keypair: &BlsKeypair, seed_str: &str) -> NetworkKeypair {
+        let mut hasher = DefaultHashFunction::new();
+        hasher.update(&primary_keypair.sign(seed_str.as_bytes()).to_bytes());
+        let hash = hasher.finalize();
+        NetworkKeypair::ed25519_from_bytes(hash.as_bytes()[0..32].to_vec())
+            .expect("invalid network key bytes")
+    }
+}
+
+impl BlsSigner for KeyConfig {
+    fn request_signature_direct(&self, msg: &[u8]) -> BlsSignature {
+        self.inner.primary_keypair.sign(msg)
+    }
+
+    fn public_key(&self) -> BlsPublicKey {
+        self.primary_public_key()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::KeyConfig;
+    use rand::{rngs::StdRng, SeedableRng};
+    use rayls_infrastructure_types::BlsKeypair;
+
+    #[test]
+    fn test_unwrap_legacy_round_count() {
+        let kp = BlsKeypair::generate(&mut StdRng::from_os_rng());
+        let pp = "legacy";
+        // A keystore wrapped with 1 PBKDF2 round, as written by test-utils builds.
+        let wrapped = KeyConfig::wrap_bls_key_with_rounds(&kp, pp, 1).expect("wrap");
+        let bytes = bs58::decode(wrapped).into_vec().expect("decode");
+        let unwrapped = KeyConfig::unwrap_bls_key(&bytes, pp).expect("unwrap legacy");
+        assert_eq!(kp.to_bytes(), unwrapped.to_bytes());
+        assert!(KeyConfig::unwrap_bls_key(&bytes, "wrong").is_err());
+    }
+
+    #[test]
+    fn test_bls_passphrase() {
+        let tmp_dir = TempDir::new().expect("tmp dir");
+        let pp = "test_bls_passphrase".to_string();
+        let kc = KeyConfig::generate_and_save(&tmp_dir.path().to_path_buf(), pp.clone())
+            .expect("BLS key config");
+        let kc2 =
+            KeyConfig::read_config(&tmp_dir.path().to_path_buf(), pp.clone()).expect("load config");
+        assert_eq!(kc.inner.primary_keypair.to_bytes(), kc2.inner.primary_keypair.to_bytes());
+    }
+
+    #[test]
+    fn test_rotate_passphrase() {
+        let tmp_dir = TempDir::new().expect("tmp dir");
+        let old = "old_pass".to_string();
+        let new = "new_pass".to_string();
+        let kc = KeyConfig::generate_and_save(&tmp_dir.path().to_path_buf(), old.clone())
+            .expect("generate");
+
+        KeyConfig::rotate_passphrase(&tmp_dir.path().to_path_buf(), &old, &new).expect("rotate");
+
+        // Only the new passphrase decrypts, and to the same key.
+        assert!(KeyConfig::read_config(&tmp_dir.path().to_path_buf(), old).is_err());
+        let kc2 = KeyConfig::read_config(&tmp_dir.path().to_path_buf(), new).expect("load config");
+        assert_eq!(kc.inner.primary_keypair.to_bytes(), kc2.inner.primary_keypair.to_bytes());
+    }
+
+    #[test]
+    fn test_rotate_passphrase_wrong_old() {
+        let tmp_dir = TempDir::new().expect("tmp dir");
+        let pp = "right".to_string();
+        KeyConfig::generate_and_save(&tmp_dir.path().to_path_buf(), pp.clone()).expect("generate");
+
+        let res = KeyConfig::rotate_passphrase(&tmp_dir.path().to_path_buf(), "wrong", "new_pass");
+        assert!(res.is_err());
+        // The keystore is untouched and still opens with the original passphrase.
+        KeyConfig::read_config(&tmp_dir.path().to_path_buf(), pp).expect("load config");
+    }
+
+    #[test]
+    fn test_rotate_passphrase_empty_new() {
+        let tmp_dir = TempDir::new().expect("tmp dir");
+        KeyConfig::generate_and_save(&tmp_dir.path().to_path_buf(), "old".to_string())
+            .expect("generate");
+        assert!(KeyConfig::rotate_passphrase(&tmp_dir.path().to_path_buf(), "old", "").is_err());
+    }
+
+    #[test]
+    fn test_empty_bls_passphrase() {
+        let tmp_dir = TempDir::new().expect("tmp dir");
+        let pp = "".to_string();
+        let res = KeyConfig::generate_and_save(&tmp_dir.path().to_path_buf(), pp.clone());
+        //expect err
+        assert!(res.is_err());
+    }
+}

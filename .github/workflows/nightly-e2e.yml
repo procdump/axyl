@@ -1,0 +1,94 @@
+name: Nightly E2E
+
+# This workflow only reads the repo (checkout + build + test); it never writes
+# back. Pin least-privilege so the GITHUB_TOKEN can't be misused.
+permissions:
+  contents: read
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Which e2e suite to run'
+        type: choice
+        required: false
+        default: 'all'
+        options:
+          - all
+          - default
+          - isolated
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: ""
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  # Non-ignored e2e tests (currently the genesis suite).
+  e2e-default:
+    name: E2E (default)
+    if: github.event_name == 'schedule' || inputs.suite == 'all' || inputs.suite == 'default'
+    runs-on: ubuntu-latest-m
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+
+      - name: Install Rust 1.91.0
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, rust-src, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: nightly-e2e
+          cache-on-failure: true
+
+      - name: Run e2e default tests
+        run: cargo test -p e2e-tests -- --test-threads 1
+
+  # Tests marked #[ignore] that must run alone — one matrix slot per test.
+  e2e-isolated:
+    name: E2E (${{ matrix.test }})
+    if: github.event_name == 'schedule' || inputs.suite == 'all' || inputs.suite == 'isolated'
+    runs-on: ubuntu-latest-m
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - restarts::test_restartstt
+          - restarts::test_restarts_observer
+          - restarts::test_observer_late_start_catchup
+          - restarts::test_restarts_delayed
+          - restarts::test_restarts_lagged_delayed
+          - epochs::test_epoch_boundary
+          - epochs::test_epoch_sync
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+
+      - name: Install Rust 1.91.0
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, rust-src, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: nightly-e2e
+          cache-on-failure: true
+
+      - name: Run ${{ matrix.test }}
+        run: cargo test -p e2e-tests --test it ${{ matrix.test }} -- --ignored --exact --test-threads 1

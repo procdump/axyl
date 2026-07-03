@@ -1,0 +1,60 @@
+[package]
+name = "axyl-fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "BUSL-1.1"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+rayls-infrastructure-types = { path = "../../../infrastructure/types" }
+indexmap = "2"
+bcs = "0.1"
+serde = { version = "1", features = ["derive"] }
+
+# Prevent this from interfering with workspaces.
+[workspace]
+members = ["."]
+
+# --- Axyl-specific validation logic ---
+
+[[bin]]
+name = "quorum_threshold"
+path = "fuzz_targets/quorum_threshold.rs"
+doc = false
+
+[[bin]]
+name = "header_nonce_roundtrip"
+path = "fuzz_targets/header_nonce_roundtrip.rs"
+doc = false
+
+[[bin]]
+name = "header_digest_integrity"
+path = "fuzz_targets/header_digest_integrity.rs"
+doc = false
+
+[[bin]]
+name = "difficulty_field_encoding"
+path = "fuzz_targets/difficulty_field_encoding.rs"
+doc = false
+
+[[bin]]
+name = "batch_digest"
+path = "fuzz_targets/batch_digest.rs"
+doc = false
+
+[[bin]]
+name = "certificate_signed_by"
+path = "fuzz_targets/certificate_signed_by.rs"
+doc = false
+
+# --- Serde consistency (Axyl custom serde impls) ---
+
+[[bin]]
+name = "bcs_roundtrip"
+path = "fuzz_targets/bcs_roundtrip.rs"
+doc = false

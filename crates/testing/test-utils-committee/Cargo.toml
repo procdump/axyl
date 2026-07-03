@@ -1,0 +1,15 @@
+[package]
+name = "rayls-testing-test-utils-committee"
+version.workspace = true
+edition = "2021"
+license = "BUSL-1.1"
+publish = false
+
+[dependencies]
+rayls-execution-evm = { workspace = true, features = ["test-utils"] }
+rayls-infrastructure-types = { workspace = true }
+rayls-infrastructure-config = { workspace = true }
+rand = { workspace = true }
+
+[lints]
+workspace = true

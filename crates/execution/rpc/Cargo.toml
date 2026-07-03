@@ -1,0 +1,23 @@
+[package]
+name = "rayls-execution-rpc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "BUSL-1.1"
+homepage.workspace = true
+repository.workspace = true
+exclude.workspace = true
+
+[dependencies]
+rayls-infrastructure-types = { workspace = true }
+rayls-execution-evm = { workspace = true }
+jsonrpsee = { workspace = true, features = ["server", "macros"] }
+jsonrpsee-types = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,29 @@
+[package]
+name = "rayls-middleware-rewards"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "BUSL-1.1"
+homepage.workspace = true
+repository.workspace = true
+authors = [
+]
+
+[dependencies]
+parking_lot = { workspace = true }
+rayls-infrastructure-storage = { workspace = true }
+rayls-infrastructure-types = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+eyre = { workspace = true }
+indexmap = { workspace = true }
+rand = { workspace = true }
+rayls-infrastructure-types = { workspace = true, features = ["test-utils"] }
+rayls-middleware-rewards = { workspace = true, features = ["test-utils"] }
+rayls-testing-test-utils = { workspace = true }
+tempfile = { workspace = true }
+
+[features]
+default = []
+test-utils = []

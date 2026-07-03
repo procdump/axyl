@@ -1,0 +1,42 @@
+graph LR
+    subgraph NA["Node A"]
+        direction TB
+        P1["Vote"]
+        P2["MissingCertificates"]
+        P3["ConsensusHeader"]
+        P4["EpochRecord"]
+        P5["PeerExchange"]
+
+        G1["Certificate"]
+        G2["Consensus"]
+        G3["EpochVote"]
+    end
+
+    subgraph NB["Node B"]
+        direction TB
+        Q1["QuorumReqRes { StopAtQuorum }<br/>Target: ValidatorsOnly<br/>Validate header, produce local vote,<br/>forward to all peers (excl. prev_hop).<br/>Merge local + downstream votes.<br/>Return partial aggregate upstream."]
+        Q2["AnyPeerReqRes<br/>Target: AnyPeer<br/>Check local DB for requested certs.<br/>Return if complete; otherwise<br/>forward to peers.<br/>Deduplicate by cert digest."]
+        Q3["AnyPeerReqRes<br/>Target: ValidatorsOnly / AnyPeer<br/>If validator and data found:<br/>return immediately.<br/>Otherwise: forward to peers."]
+        Q4["AnyPeerReqRes<br/>Target: AnyPeer<br/>Return if record stored locally.<br/>Otherwise: forward to peers."]
+        Q5["Intercepted by network layer.<br/>Handled internally."]
+
+        R1["Unchanged.<br/>Auto-broadcast by GossipSub."]
+        R2["Unchanged.<br/>Auto-broadcast by GossipSub."]
+        R3["Unchanged.<br/>Auto-broadcast by GossipSub."]
+    end
+
+    %% P2P Request-Response (upgraded to relay)
+    P1 -->|"QuorumReqRes<br/>StopAtQuorum"| Q1
+    P2 -->|"AnyPeerReqRes<br/>AnyPeer"| Q2
+    P3 -->|"AnyPeerReqRes<br/>ValidatorsOnly/AnyPeer"| Q3
+    P4 -->|"AnyPeerReqRes<br/>AnyPeer"| Q4
+    P5 -->|" "| Q5
+
+    %% Gossip (unchanged)
+    G1 -.->|"rayls_certificates"| R1
+    G2 -.->|"rayls_consensus_headers"| R2
+    G3 -.->|"rayls_epoch_votes"| R3
+
+    %% Architectural note
+    NOTE["All 6 P2P messages use application-level request/response relay.<br/>Each hop uses libp2p request_response between directly connected peers.<br/>The relay layer handles multi-hop forwarding, deduplication (request_id + LRU),<br/>partial aggregation (QuorumReqRes), and loop prevention.<br/>Relayed via application-level request/response. No direct connection required.<br/><br/>Validators no longer need direct connections to all committee peers.<br/>Observers can connect to any relay node instead of requiring a direct validator connection."]
+    style NOTE fill:#e3f2fd,stroke:#1565c0,stroke-width:2px

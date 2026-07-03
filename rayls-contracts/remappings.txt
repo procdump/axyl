@@ -1,0 +1,5 @@
+forge-std/=node_modules/forge-std/src/
+solady/=node_modules/solady/src/
+@openzeppelin/=node_modules/@openzeppelin/
+safe-contracts/=node_modules/safe-contracts/
+rayls-contracts/=node_modules/rayls-contracts/

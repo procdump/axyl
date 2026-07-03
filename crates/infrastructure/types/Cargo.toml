@@ -1,0 +1,56 @@
+[package]
+name = "rayls-infrastructure-types"
+version.workspace = true
+edition = "2021"
+license = "BUSL-1.1"
+authors = [
+]
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+bcs = { workspace = true }
+bincode = { workspace = true }
+# direct reth currently for circular deps
+reth = { workspace = true }
+reth-primitives = { workspace = true }
+reth-chainspec = { workspace = true }
+reth-tasks = { workspace = true }
+dashmap = { workspace = true }
+derive_builder = { workspace = true }
+futures = { workspace = true }
+indexmap = { workspace = true }
+rand = { workspace = true }
+roaring = { workspace = true }
+serde = { workspace = true }
+serde_with = { workspace = true }
+serde_yaml = { workspace = true }
+serde_repr = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "macros", "signal"] }
+tracing = { workspace = true }
+eyre = { workspace = true }
+once_cell = { workspace = true }
+parking_lot = { workspace = true }
+secp256k1 = { workspace = true }
+libp2p = { workspace = true, features = ["serde"] }
+bs58 = { workspace = true }
+blake3 = { workspace = true }
+blst = { workspace = true, features = ["serde"] }
+alloy = { workspace = true, features = ["genesis"] }
+hex = { workspace = true }
+
+
+# test-utils
+tracing-subscriber = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+
+[features]
+default = []
+cli = ["clap"]
+test-utils = ["tracing-subscriber", "clap"]
+# Relaxes committee-size assertion to allow n=1 for single-validator dev chains.
+dev-single-node-setup = []
+
+[lints]
+workspace = true

@@ -1,0 +1,253 @@
+name: Pull Request Checks
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, review_requested, ready_for_review]
+    branches:
+      - main
+
+env:
+  CARGO_INCREMENTAL: 0 # disable incremental compilation
+  RUSTFLAGS: ""
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  # ===========================================================================
+  # FORMAT - rustfmt check (honors rustfmt.toml)
+  # ===========================================================================
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      # - name: Check if draft PR
+      #   run: |
+      #     if [[ "${{ github.event.pull_request.draft }}" == "true" ]]; then
+      #       echo "Draft PR detected, exiting the workflow"
+      #       exit 1
+      #     fi
+
+      # checkout repo
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1 # Shallow clone
+
+      # rustfmt.toml uses nightly-only options (wrap_comments, comment_width,
+      # format_code_in_doc_comments, doc_comment_code_block_width), so the check
+      # must run on nightly rustfmt — stable would silently ignore them.
+      - name: Install nightly rustfmt
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: nightly
+          components: rustfmt
+
+      # --check fails (non-zero exit) if any file is not formatted per rustfmt.toml
+      - name: Check formatting
+        run: cargo +nightly fmt --all --check
+
+  # ===========================================================================
+  # TESTS - Rust workspace tests
+  # ===========================================================================
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest-m
+    steps:
+      # exit immediately for drafts
+      # - name: Check if draft PR
+      #   run: |
+      #     if [[ "${{ github.event.pull_request.draft }}" == "true" ]]; then
+      #       echo "Draft PR detected, exiting the workflow"
+      #       exit 1
+      #     fi
+
+      # checkout repo and submodule
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1 # Shallow clone
+
+      # install rust — dtolnay action handles caching of the toolchain
+      - name: Install Rust 1.91.0
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, rust-src, clippy
+
+      # cache target/ and cargo registry across PRs via shared-key
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: pr-tests
+          cache-on-failure: true
+
+      # use cargo test (not nextest) to match what developers run locally —
+      # nextest discovers a different set of tests, which has caused divergence
+      - name: Run tests
+        run: cargo test --workspace --exclude rayls-execution-faucet --exclude e2e-tests -- --quiet --test-threads 1
+
+  # ===========================================================================
+  # SECURITY SCAN - Trivy vulnerability scanning (filesystem/code)
+  # ===========================================================================
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest-m
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Run Trivy vulnerability scanner
+        id: trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          output: 'trivy-results.txt'
+          exit-code: '1'
+          ignore-unfixed: true
+          scanners: 'vuln,misconfig'
+          severity: 'HIGH,CRITICAL'
+        continue-on-error: true
+
+      - name: Read Trivy results
+        id: results
+        if: always()
+        run: |
+          if [ -f trivy-results.txt ]; then
+            echo "results<<EOF" >> $GITHUB_OUTPUT
+            cat trivy-results.txt >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "results=No scan results available" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Post Trivy results to PR
+        if: always()
+        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
+        with:
+          header: trivy-code
+          message: |
+            ## Security Scan - Code
+
+            **Severity:** HIGH, CRITICAL
+
+            ${{ steps.trivy.outcome == 'failure' && '**Vulnerabilities found:**' || '**No vulnerabilities found**' }}
+
+            <details>
+            <summary>View scan results</summary>
+
+            ```
+            ${{ steps.results.outputs.results }}
+            ```
+
+            </details>
+
+      - name: Fail if vulnerabilities found
+        if: steps.trivy.outcome == 'failure'
+        run: exit 1
+
+  # ===========================================================================
+  # CONTRACTS TESTS - Foundry (forge) tests for rayls-contracts
+  # Only runs when the contracts or their local npm package change.
+  # ===========================================================================
+  contracts-tests:
+    name: Contracts Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # exit immediately for drafts 
+      # - name: Check if draft PR
+      #   run: |
+      #     if [[ "${{ github.event.pull_request.draft }}" == "true" ]]; then
+      #       echo "Draft PR detected, exiting the workflow"
+      #       exit 1
+      #     fi
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1 # Shallow clone
+
+      # Detect whether this PR touches the contracts or their local npm package.
+      # All subsequent steps are gated on this, so the job is a fast no-op for
+      # PRs that don't touch Solidity.
+      - name: Detect contract changes
+        id: changes
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        with:
+          filters: |
+            contracts:
+              - 'rayls-contracts/**'
+
+      - name: Setup Node
+        if: steps.changes.outputs.contracts == 'true'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: rayls-contracts/package-lock.json
+
+      - name: Install npm dependencies
+        if: steps.changes.outputs.contracts == 'true'
+        working-directory: rayls-contracts
+        run: npm ci
+
+      - name: Install Foundry
+        if: steps.changes.outputs.contracts == 'true'
+        uses: foundry-rs/foundry-toolchain@c7450ba673e133f5ee30098b3b54f444d3a2ca2d # v1.8.0
+        with:
+          version: stable
+
+      - name: Run forge tests
+        id: forge
+        if: steps.changes.outputs.contracts == 'true'
+        working-directory: rayls-contracts
+        run: |
+          set -o pipefail
+          forge test --summary 2>&1 | tee forge-results.txt
+        continue-on-error: true
+
+      - name: Read forge results
+        id: results
+        if: steps.changes.outputs.contracts == 'true'
+        run: |
+          if [ -f rayls-contracts/forge-results.txt ]; then
+            echo "results<<EOF" >> $GITHUB_OUTPUT
+            # cap output so the comment stays under GitHub's 65536-char limit
+            tail -c 60000 rayls-contracts/forge-results.txt >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "results=No forge output produced" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Post contracts test results to PR
+        if: steps.changes.outputs.contracts == 'true'
+        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
+        with:
+          header: contracts-tests
+          message: |
+            ## Contracts Tests (Foundry)
+
+            **Package:** `rayls-contracts`
+
+            ${{ steps.forge.outcome == 'failure' && '❌ **Tests failed**' || '✅ **All tests passed**' }}
+
+            <details>
+            <summary>View forge test results</summary>
+
+            ```
+            ${{ steps.results.outputs.results }}
+            ```
+
+            </details>
+
+      - name: Fail if contract tests failed
+        if: steps.changes.outputs.contracts == 'true' && steps.forge.outcome == 'failure'
+        run: exit 1

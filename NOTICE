@@ -1,0 +1,125 @@
+# NOTICE
+
+Rayls Network
+Copyright (c) 2026 Rayls Core Ltd.
+
+## Licensing summary
+
+This repository is a **derivative work**. Rayls' own code and Rayls' modifications are
+licensed under the **Business Source License 1.1 (BUSL-1.1)** — see [LICENSE](./LICENSE)
+(Change Date: 4 years; Change License: Apache-2.0).
+
+The repository incorporates and modifies code from the third-party projects listed below.
+Those portions remain copyright their respective authors under their original licenses —
+the [Apache License 2.0](./LICENSE-APACHE), or the MIT License for the bundled LayerZero
+interfaces (reproduced in the LayerZero section below). The original works remain available
+from their upstreams under those licenses.
+
+**Files incorporated from these upstream projects have been modified by Rayls.**
+
+---
+
+## Telcoin Network  (Apache-2.0 / MIT)
+
+The **Axyl Rust consensus workspace as a whole is derived from Telcoin Network** — Rayls
+renamed, reorganized, and modified the code. Telcoin Network itself builds on the Sui
+project (below); the Narwhal/Bullshark consensus design originates from Sui.
+
+Copyright (c) 2025 Telcoin Association and contributors
+- https://github.com/Telcoin-Association/telcoin-network (Rust consensus; Apache-2.0 / MIT)
+- https://github.com/Telcoin-Association/tn-contracts (Solidity contracts; Apache-2.0 / MIT)
+
+Substantially all crates under `crates/` and `bin/` are derived from telcoin-network,
+**except** these Rayls-original crates: `middleware/rewards`,
+`testing/chaos-framework`, `testing/fuzz-targets`, `bin/rayls-replay` — and the reth-based
+`execution/evm` and `execution/execution-metrics` (see Reth below).
+
+Solidity files in `rayls-contracts/` derived from / co-authored with Telcoin (tn-contracts):
+- `src/consensus/`: ConsensusRegistry.sol, StakeManager.sol, SystemCallable.sol, BlsG1.sol
+- `src/interfaces/`: IConsensusRegistry.sol, IStakeManager.sol
+- `test/consensus/`: ConsensusRegistryTest.t.sol, ConsensusRegistryTestFuzz.t.sol, ConsensusRegistryTestUtils.sol
+- `test/EIP2537/`: BlsG1.t.sol, BlsG1Harness.sol
+- `script/GeneratePrecompileGenesisConfig.s.sol`, `deployments/genesis/GenesisPrecompiler.sol`
+
+---
+
+## Sui  (Apache-2.0)
+
+The consensus design above originates from the Sui project:
+Copyright (c) 2021, Facebook, Inc. and its affiliates
+Copyright (c) 2021, Mysten Labs, Inc.
+
+Licensed under the Apache License, Version 2.0.
+
+---
+
+## Reth  (Apache-2.0 / MIT)
+
+`crates/execution/evm` and `crates/execution/execution-metrics` **build on reth as a
+dependency** (reth / revm / alloy) — re-exporting and wrapping its APIs. Reth is used as a
+library, not copied into this repository.
+- Reth Contributors (c) 2022-2025
+
+---
+
+## LayerZero  (MIT)
+
+`rayls-contracts/` includes two OFT interop interfaces derived from LayerZero-Labs/devtools
+(the `oft-evm` package), published under the MIT License:
+- `src/interfaces/IOFT.sol`
+- `src/interfaces/IMintableBurnable.sol`
+
+LayerZero's upstream files carry an SPDX `MIT` tag and no per-file copyright line; we retain
+the same. The MIT permission notice covering these files:
+
+    MIT License
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+    THE SOFTWARE.
+
+## Algebra / Uniswap interoperability interfaces  (Rayls first-party, BUSL-1.1)
+
+`rayls-contracts/` declares three minimal Solidity interfaces used by the Rayls
+`FeeAggregator` to interoperate with on-chain Algebra Integral (Uniswap-V3-style) pools and
+the periphery swap router:
+- `src/interfaces/IAlgebraPool.sol`
+- `src/interfaces/ISwapRouter.sol`
+- `src/interfaces/callback/IAlgebraSwapCallback.sol`
+
+These interfaces were independently declared from the published contract ABI solely to call
+deployed Algebra contracts. They are **not** derived from, and contain no source copied from,
+the Algebra or Uniswap codebases, and are therefore not subject to those projects' licenses.
+They are Rayls-authored first-party code, licensed under BUSL-1.1.
+
+---
+
+## Solidity build dependencies
+
+The Solidity contracts are compiled against the following third-party libraries (resolved
+via npm, not vendored into this repository's source). Their compiled code is embedded in the
+deployed contracts and the generated `artifacts/`, under their respective licenses:
+
+- OpenZeppelin Contracts and Contracts-Upgradeable — MIT — https://github.com/OpenZeppelin/openzeppelin-contracts
+- solady — MIT — https://github.com/Vectorized/solady
+- forge-std — Apache-2.0 / MIT — https://github.com/foundry-rs/forge-std (test & deployment tooling only)
+- @safe-global/safe-contracts — LGPL-3.0 — https://github.com/safe-global/safe-smart-account
+  (used only by genesis/deployment tooling to deploy Safe instances; not embedded in the product contracts)
+
+The MIT-licensed components above are provided under the MIT License, whose permission
+notice is reproduced in the LayerZero section. The authoritative copyright and full license
+text for each component ship with its package and are available in its repository.

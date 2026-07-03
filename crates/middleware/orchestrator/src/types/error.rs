@@ -1,0 +1,20 @@
+//! Error types for spawning a full node
+
+use eyre::ErrReport;
+use rayls_infrastructure_types::WorkerId;
+use thiserror::Error;
+
+/// Error types when spawning the ExecutionNode
+#[derive(Debug, Error)]
+pub(crate) enum ExecutionError {
+    /// Error creating temp db
+    #[error(transparent)]
+    Tempdb(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Report(#[from] ErrReport),
+
+    /// Worker id is not included in the execution node's known worker hashmap.
+    #[error("Worker not found: {0:?}")]
+    WorkerNotFound(WorkerId),
+}

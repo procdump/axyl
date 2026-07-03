@@ -1,0 +1,36 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+        "label": "Run PPROF Validator Locally",
+        "type": "shell",
+        "command": "samply",
+        "group": "build",
+        "args": [
+            "record",
+            "${workspaceRoot}/target/debug/rayls-network",
+            "node",
+            "--datadir", "${workspaceRoot}/etc/debug-network/local-validators/validator-1",
+            "--instance", "1",
+            "--metrics", "127.0.0.1:9300",
+            "--log.stdout.format", "log-fmt",
+            "--txpool.pending-max-count", "1000000",
+            "--txpool.pending-max-size", "1242880000",
+            "--txpool.basefee-max-count", "1000000",
+            "--txpool.basefee-max-size", "20971120000",
+            "--txpool.queued-max-count", "1000000",
+            "--txpool.queued-max-size", "20971120000",
+            "--txpool.max-pending-txns", "1000000",
+            "--txpool.max-new-txns", "1000000",
+            "--txpool.minimal-protocol-fee", "0",
+            "--txpool.max-tx-input-bytes", "999999999999",
+            "-v",
+            "--http.addr", "0.0.0.0",
+            "--http"
+        ],
+        "options": {
+            "env": {"RL_BLS_PASSPHRASE": "local", "RPC_PORT": "8545"}
+        }
+    }
+  ]
+}

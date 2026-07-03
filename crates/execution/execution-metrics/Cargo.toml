@@ -1,0 +1,23 @@
+[package]
+name = "rayls-execution-metrics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors = []
+
+[dependencies]
+eyre = { workspace = true }
+tracing = { workspace = true }
+rayls-infrastructure-types = { workspace = true }
+reth-node-metrics = { workspace = true }
+reth-tasks = { workspace = true }
+reth-node-types = { workspace = true }
+reth-provider = { workspace = true }
+reth-tracing = { workspace = true }
+reth-db-api = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,92 @@
+graph TB
+    %% Node A
+    subgraph NA["Node A"]
+        direction TB
+
+        M_A["main.rs<br/><i>launch_node()</i>"]
+        EM_A["EpochManager<br/><i>run() → run_epoch()</i>"]
+        ENG_A["Engine (EVM)"]
+
+        M_A --> EM_A
+
+        subgraph P_A["Primary"]
+            P1_A["Proposer<br/><i>builds headers</i>"]
+            P2_A["Certifier<br/><i>requests votes</i>"]
+            P3_A["CertificateFetcher<br/><i>fetches missing certs</i>"]
+            P4_A["StateSynchronizer<br/><i>cert lifecycle</i>"]
+            P5_A["StateHandler<br/><i>round tracking / GC</i>"]
+            P6_A["Consensus<br/><i>Bullshark ordering</i>"]
+            P7_A["Executor<br/><i>bridge to Engine</i>"]
+        end
+
+        subgraph W_A["Worker"]
+            W1_A["BatchBuilder<br/><i>seals batches</i>"]
+            W2_A["Worker<br/><i>QuorumWaiter + BatchFetcher</i>"]
+            W3_A["BatchValidator<br/><i>validates incoming</i>"]
+        end
+
+        EM_A --> P1_A
+        EM_A --> P2_A
+        EM_A --> P3_A
+        EM_A --> P4_A
+        EM_A --> P5_A
+        EM_A --> P6_A
+        EM_A --> P7_A
+        EM_A --> W1_A
+        EM_A --> W2_A
+        EM_A --> W3_A
+
+        P7_A -->|"consensus output"| ENG_A
+
+        W_A -.->|"in-process<br/>LocalNetwork"| P_A
+    end
+
+    %% Node B
+    subgraph NB["Node B"]
+        direction TB
+
+        M_B["main.rs<br/><i>launch_node()</i>"]
+        EM_B["EpochManager<br/><i>run() → run_epoch()</i>"]
+        ENG_B["Engine (EVM)"]
+
+        M_B --> EM_B
+
+        subgraph P_B["Primary"]
+            P1_B["Proposer<br/><i>builds headers</i>"]
+            P2_B["Certifier<br/><i>requests votes</i>"]
+            P3_B["CertificateFetcher<br/><i>fetches missing certs</i>"]
+            P4_B["StateSynchronizer<br/><i>cert lifecycle</i>"]
+            P5_B["StateHandler<br/><i>round tracking / GC</i>"]
+            P6_B["Consensus<br/><i>Bullshark ordering</i>"]
+            P7_B["Executor<br/><i>bridge to Engine</i>"]
+        end
+
+        subgraph W_B["Worker"]
+            W1_B["BatchBuilder<br/><i>seals batches</i>"]
+            W2_B["Worker<br/><i>QuorumWaiter + BatchFetcher</i>"]
+            W3_B["BatchValidator<br/><i>validates incoming</i>"]
+        end
+
+        EM_B --> P1_B
+        EM_B --> P2_B
+        EM_B --> P3_B
+        EM_B --> P4_B
+        EM_B --> P5_B
+        EM_B --> P6_B
+        EM_B --> P7_B
+        EM_B --> W1_B
+        EM_B --> W2_B
+        EM_B --> W3_B
+
+        P7_B -->|"consensus output"| ENG_B
+
+        W_B -.->|"in-process<br/>LocalNetwork"| P_B
+    end
+
+    %% Cross-node connections
+    P_A <-->|"Primary Network<br/>P2P: Vote, MissingCertificates,<br/>ConsensusHeader, EpochRecord,<br/>PeerExchange<br/>+<br/>GossipSub: Certificate,<br/>Consensus, EpochVote"| P_B
+    W_A <-->|"Worker Network<br/>P2P: ReportBatch,<br/>RequestBatches, PeerExchange<br/>+<br/>GossipSub: Batch, Txn"| W_B
+
+    %% Architectural note
+    NOTE["P2P messages require direct connections between nodes.<br/>All validators must maintain direct connections to each other.<br/>Observers need at least one direct connection to a validator."]
+    style NOTE fill:#fff3e0,stroke:#e65100,stroke-width:2px

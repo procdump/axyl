@@ -1,0 +1,62 @@
+{
+  "name": "rayls-contracts",
+  "version": "1.0.0",
+  "description": "Rayls Contracts",
+  "type": "module",
+  "module": "ESNext",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node node/dist/subscriber.js",
+    "subscriber": "npm run build && node node/dist/relay/subscriber.js",
+    "includer": "npm run build && node node/dist/relay/includer.js",
+    "initiate": "npm run build && node node/dist/relay/devnet/initiate.js",
+    "verify": "npm run build && node node/dist/relay/devnet/verify.js",
+    "route": "npm run build && node node/dist/relay/devnet/route.js",
+    "construct-proof": "npm run build && node node/dist/relay/devnet/proof.js",
+    "approve": "npm run build && node node/dist/relay/devnet/approve.js",
+    "execute": "npm run build && node node/dist/relay/devnet/execute.js",
+    "build-and-start": "npm run build && npm run start",
+    "clean": "rm -rf node/dist",
+    "watch": "tsc --watch",
+    "test": "forge test"
+  },
+  "repository": {
+    "type": "git"
+  },
+  "keywords": [
+    "Rayls"
+  ],
+  "author": "robriks",
+  "license": "BUSL-1.1",
+  "engines": {
+    "node": "18.x"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "5.4.0",
+    "@openzeppelin/contracts-upgradeable": "5.4.0",
+    "axios": "^1.16.0",
+    "dotenv": "^16.4.5",
+    "forge-std": "github:foundry-rs/forge-std",
+    "js-yaml": "^4.2.0",
+    "safe-contracts": "npm:@safe-global/safe-contracts@1.4.1",
+    "solady": "^0.0.227",
+    "viem": "^2.52.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.14.11",
+    "mermaid": "^11.15.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.3"
+  },
+  "overrides": {
+    "ws": ">=8.21.0",
+    "safe-contracts": {
+      "ethers": "^6.0.0"
+    }
+  }
+}

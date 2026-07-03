@@ -1,0 +1,61 @@
+[package]
+name = "rayls-consensus-primary"
+version.workspace = true
+license = "BUSL-1.1"
+authors = [
+]
+publish = false
+edition = "2021"
+
+[dependencies]
+eyre = { workspace = true }
+backoff = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true, features = ["small_rng"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+    "sync",
+    "rt",
+    "macros",
+    "time",
+    "test-util",
+] }
+tracing = { workspace = true }
+rayls-infrastructure-network-types = { workspace = true }
+rayls-infrastructure-types = { workspace = true }
+rayls-infrastructure-config = { workspace = true }
+rayls-infrastructure-storage = { workspace = true }
+consensus-metrics = { workspace = true }
+rayls-consensus-primary-metrics = { workspace = true }
+rayls-consensus-network = { workspace = true }
+roaring = { workspace = true }
+serde = { workspace = true }
+async-trait = { workspace = true }
+
+# test-utils
+rayls-execution-evm = { workspace = true, features = ["test-utils"], optional = true }
+indexmap = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+futures = { workspace = true }
+proptest = { workspace = true }
+tracing = { workspace = true }
+rayls-infrastructure-storage = { workspace = true }
+assert_matches = { workspace = true }
+rayls-infrastructure-types = { workspace = true, features = ["test-utils"] }
+rayls-consensus-primary = { workspace = true, features = ["test-utils"] }
+rayls-testing-test-utils-committee = { workspace = true }
+
+[features]
+default = []
+test-utils = ["rayls-execution-evm", "indexmap", "tempfile"]
+# Single-node / local dev consensus behavior (block pacing in the proposer, and
+# skipping peer-only subsystems like the certificate fetcher). Off by default;
+# enabled transitively by the top-level `dev-single-node-setup` feature. NOT FOR PRODUCTION.
+dev-single-node-setup = []
+
+[lints]
+workspace = true

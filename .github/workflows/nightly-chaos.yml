@@ -1,0 +1,70 @@
+name: Nightly Chaos
+
+# Runs the chaos-framework fault-injection scenarios. These are all #[ignore]
+# (they spawn a full 4-validator local testnet) and must run single-threaded.
+#
+# Some scenarios (latency / packet-loss / partition) inject faults with `tc`
+# and `iptables` against the loopback interface, which require root — so the
+# test binary is run via sudo. Crash / spam / restart scenarios don't need it
+# but are unaffected by running as root.
+#
+# Not part of PR checks: chaos runs are slower and fault-injection is inherently
+# noisier than deterministic e2e, so it must never gate a merge.
+
+# This workflow only reads the repo (checkout + build + test); it never writes
+# back. Pin least-privilege so the GITHUB_TOKEN can't be misused.
+permissions:
+  contents: read
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # 03:00 UTC daily (after nightly-e2e at 02:00)
+  workflow_dispatch:
+    inputs:
+      test:
+        description: 'Single test to run (exact name, e.g. test_full_network_restart). Leave empty to run all scenarios.'
+        type: string
+        required: false
+        default: ''
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: ""
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  chaos:
+    name: Chaos scenarios
+    runs-on: ubuntu-latest-m
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+
+      - name: Install Rust 1.91.0
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, rust-src, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: nightly-chaos
+          cache-on-failure: true
+
+      - name: Ensure tc / iptables are available
+        run: sudo apt-get update && sudo apt-get install -y iproute2 iptables
+
+      # The network-fault scenarios shell out to `tc`/`iptables` (no sudo of
+      # their own), so the test process itself must be root. `rustup which cargo`
+      # resolves the toolchain binary as the runner user; sudo -E then runs it
+      # as root with the environment (PATH, HOME, CARGO_HOME) preserved.
+      - name: Run chaos scenarios
+        run: |
+          sudo -E "$(rustup which cargo)" test -p chaos-framework --test chaos_scenarios \
+            -- --ignored --exact --test-threads 1 ${{ github.event.inputs.test }}

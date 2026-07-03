@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/raylsnetwork/axyl/blob/main/SECURITY.md
+    about: Do not open a public issue for security reports — see SECURITY.md for the private disclosure channel.
+  - name: Operator runbooks
+    url: https://github.com/raylsnetwork/axyl/tree/main/etc
+    about: For "how do I run / join / monitor a node?" questions, start with the per-subsystem READMEs under etc/.
+  - name: System overview & per-crate docs
+    url: https://github.com/raylsnetwork/axyl/tree/main/doc
+    about: For "how does X work internally?" questions, the maintained docs live under doc/.

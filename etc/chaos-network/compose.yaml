@@ -1,0 +1,253 @@
+# Chaos testing compose file for Axyl.
+#
+# Extends the standard docker-network setup with:
+# - NET_ADMIN capability on validators (for tc/iptables inside containers)
+# - iproute2 + iptables installed in the image
+# - Shorter epoch duration (15s) to exercise epoch transitions quickly
+#
+# Usage:
+#   docker compose -f etc/chaos-network/compose.yaml up --build -d
+#   # run the harness on the HOST — it drives faults via the `docker` CLI and
+#   # queries the published RPC ports (7542-7545); it is not a compose service:
+#   ./etc/chaos-network/scripts/run-chaos.sh [scenario]
+#   docker compose -f etc/chaos-network/compose.yaml down -v
+
+services:
+  # Build image with network tools for chaos testing
+  rayls-chaos-base:
+    image: local-rayls-chaos:latest
+    build:
+      context: ../../
+      dockerfile: etc/chaos-network/Dockerfile
+
+  # --- Setup services (generate validator keys) ---
+  setup1:
+    image: local-rayls-chaos:latest
+    depends_on:
+      rayls-chaos-base:
+        condition: service_started
+    environment:
+      - RL_EXTERNAL_PRIMARY_ADDR=/ip4/10.20.0.21/udp/49590/quic-v1
+      - RL_EXTERNAL_WORKER_ADDRS=/ip4/10.20.0.21/udp/49595/quic-v1
+      - EXECUTION_ADDRESS=0x1111111111111111111111111111111111111111
+      - RL_BLS_PASSPHRASE=chaos
+    user: "root"
+    command: ["bash", "/scripts/setup_validator.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+      - validator1-data:/home/nonroot/data
+
+  setup2:
+    image: local-rayls-chaos:latest
+    depends_on:
+      rayls-chaos-base:
+        condition: service_started
+    environment:
+      - RL_EXTERNAL_PRIMARY_ADDR=/ip4/10.20.0.22/udp/49590/quic-v1
+      - RL_EXTERNAL_WORKER_ADDRS=/ip4/10.20.0.22/udp/49595/quic-v1
+      - EXECUTION_ADDRESS=0x2222222222222222222222222222222222222222
+      - RL_BLS_PASSPHRASE=chaos
+    user: "root"
+    command: ["bash", "/scripts/setup_validator.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+      - validator2-data:/home/nonroot/data
+
+  setup3:
+    image: local-rayls-chaos:latest
+    depends_on:
+      rayls-chaos-base:
+        condition: service_started
+    environment:
+      - RL_EXTERNAL_PRIMARY_ADDR=/ip4/10.20.0.23/udp/49590/quic-v1
+      - RL_EXTERNAL_WORKER_ADDRS=/ip4/10.20.0.23/udp/49595/quic-v1
+      - EXECUTION_ADDRESS=0x3333333333333333333333333333333333333333
+      - RL_BLS_PASSPHRASE=chaos
+    user: "root"
+    command: ["bash", "/scripts/setup_validator.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+      - validator3-data:/home/nonroot/data
+
+  setup4:
+    image: local-rayls-chaos:latest
+    depends_on:
+      rayls-chaos-base:
+        condition: service_started
+    environment:
+      - RL_EXTERNAL_PRIMARY_ADDR=/ip4/10.20.0.24/udp/49590/quic-v1
+      - RL_EXTERNAL_WORKER_ADDRS=/ip4/10.20.0.24/udp/49595/quic-v1
+      - EXECUTION_ADDRESS=0x4444444444444444444444444444444444444444
+      - RL_BLS_PASSPHRASE=chaos
+    user: "root"
+    command: ["bash", "/scripts/setup_validator.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+      - validator4-data:/home/nonroot/data
+
+  # --- Genesis ceremony ---
+  committee:
+    image: local-rayls-chaos:latest
+    environment:
+      - RL_BLS_PASSPHRASE=chaos
+    user: "root"
+    command: ["bash", "/scripts/genesis.sh"]
+    depends_on:
+      setup1:
+        condition: service_completed_successfully
+      setup2:
+        condition: service_completed_successfully
+      setup3:
+        condition: service_completed_successfully
+      setup4:
+        condition: service_completed_successfully
+    volumes:
+      - ./scripts:/scripts:ro
+      - sharedgenesisdir:/home/nonroot/data/genesis
+      - validator1-data:/home/nonroot/data/validator-1
+      - validator2-data:/home/nonroot/data/validator-2
+      - validator3-data:/home/nonroot/data/validator-3
+      - validator4-data:/home/nonroot/data/validator-4
+
+  # --- Validators with NET_ADMIN for chaos fault injection ---
+  validator1:
+    image: local-rayls-chaos:latest
+    container_name: chaos-validator1
+    depends_on:
+      committee:
+        condition: service_completed_successfully
+    environment:
+      - RUST_LOG=info,execution=debug
+      - RL_BLS_PASSPHRASE=chaos
+      - PRIMARY_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49590/quic-v1
+      - WORKER_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49595/quic-v1
+    cap_add:
+      - NET_ADMIN
+    user: "1101:1101"
+    command: >
+      /usr/local/bin/rayls node --datadir /home/nonroot/data
+      --log.stdout.format log-fmt --full --storage.v2
+      --txpool.pending-max-count 50000 --txpool.pending-max-size 62144000
+      --txpool.basefee-max-count 50000 --txpool.basefee-max-size 1048556000
+      --txpool.queued-max-count 50000 --txpool.queued-max-size 1048556000
+      --txpool.max-pending-txns 50000 --txpool.max-new-txns 50000
+      --txpool.minimal-protocol-fee 0 --txpool.max-tx-input-bytes 999999999999
+      --txpool.max-account-slots 50000 --gpo.default-suggested-fee 0
+      --http --http.api all --http.addr 0.0.0.0
+    ports:
+      - "127.0.0.1:7545:8545"
+    volumes:
+      - validator1-data:/home/nonroot/data
+    networks:
+      chaos-net:
+        ipv4_address: 10.20.0.21
+
+  validator2:
+    image: local-rayls-chaos:latest
+    container_name: chaos-validator2
+    depends_on:
+      committee:
+        condition: service_completed_successfully
+    environment:
+      - RUST_LOG=info,execution=debug
+      - RL_BLS_PASSPHRASE=chaos
+      - PRIMARY_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49590/quic-v1
+      - WORKER_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49595/quic-v1
+    cap_add:
+      - NET_ADMIN
+    user: "1101:1101"
+    command: >
+      /usr/local/bin/rayls node --datadir /home/nonroot/data
+      --log.stdout.format log-fmt --full --storage.v2
+      --txpool.pending-max-count 50000 --txpool.pending-max-size 62144000
+      --txpool.basefee-max-count 50000 --txpool.basefee-max-size 1048556000
+      --txpool.queued-max-count 50000 --txpool.queued-max-size 1048556000
+      --txpool.max-pending-txns 50000 --txpool.max-new-txns 50000
+      --txpool.minimal-protocol-fee 0 --txpool.max-tx-input-bytes 999999999999
+      --txpool.max-account-slots 50000 --gpo.default-suggested-fee 0
+      --http --http.api all --http.addr 0.0.0.0
+    ports:
+      - "127.0.0.1:7544:8545"
+    volumes:
+      - validator2-data:/home/nonroot/data
+    networks:
+      chaos-net:
+        ipv4_address: 10.20.0.22
+
+  validator3:
+    image: local-rayls-chaos:latest
+    container_name: chaos-validator3
+    depends_on:
+      committee:
+        condition: service_completed_successfully
+    environment:
+      - RUST_LOG=info,execution=debug
+      - RL_BLS_PASSPHRASE=chaos
+      - PRIMARY_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49590/quic-v1
+      - WORKER_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49595/quic-v1
+    cap_add:
+      - NET_ADMIN
+    user: "1101:1101"
+    command: >
+      /usr/local/bin/rayls node --datadir /home/nonroot/data
+      --log.stdout.format log-fmt --full --storage.v2
+      --txpool.pending-max-count 50000 --txpool.pending-max-size 62144000
+      --txpool.basefee-max-count 50000 --txpool.basefee-max-size 1048556000
+      --txpool.queued-max-count 50000 --txpool.queued-max-size 1048556000
+      --txpool.max-pending-txns 50000 --txpool.max-new-txns 50000
+      --txpool.minimal-protocol-fee 0 --txpool.max-tx-input-bytes 999999999999
+      --txpool.max-account-slots 50000 --gpo.default-suggested-fee 0
+      --http --http.api all --http.addr 0.0.0.0
+    ports:
+      - "127.0.0.1:7543:8545"
+    volumes:
+      - validator3-data:/home/nonroot/data
+    networks:
+      chaos-net:
+        ipv4_address: 10.20.0.23
+
+  validator4:
+    image: local-rayls-chaos:latest
+    container_name: chaos-validator4
+    depends_on:
+      committee:
+        condition: service_completed_successfully
+    environment:
+      - RUST_LOG=info,execution=debug
+      - RL_BLS_PASSPHRASE=chaos
+      - PRIMARY_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49590/quic-v1
+      - WORKER_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49595/quic-v1
+    cap_add:
+      - NET_ADMIN
+    user: "1101:1101"
+    command: >
+      /usr/local/bin/rayls node --datadir /home/nonroot/data
+      --log.stdout.format log-fmt --full --storage.v2
+      --txpool.pending-max-count 50000 --txpool.pending-max-size 62144000
+      --txpool.basefee-max-count 50000 --txpool.basefee-max-size 1048556000
+      --txpool.queued-max-count 50000 --txpool.queued-max-size 1048556000
+      --txpool.max-pending-txns 50000 --txpool.max-new-txns 50000
+      --txpool.minimal-protocol-fee 0 --txpool.max-tx-input-bytes 999999999999
+      --txpool.max-account-slots 50000 --gpo.default-suggested-fee 0
+      --http --http.api all --http.addr 0.0.0.0
+    ports:
+      - "127.0.0.1:7542:8545"
+    volumes:
+      - validator4-data:/home/nonroot/data
+    networks:
+      chaos-net:
+        ipv4_address: 10.20.0.24
+
+volumes:
+  validator1-data:
+  validator2-data:
+  validator3-data:
+  validator4-data:
+  sharedgenesisdir:
+
+networks:
+  chaos-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.20.0.0/16

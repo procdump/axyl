@@ -1,0 +1,43 @@
+[package]
+name = "rayls-middleware-processor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "BUSL-1.1"
+homepage.workspace = true
+repository.workspace = true
+authors = [
+]
+
+[dependencies]
+futures = { workspace = true }
+futures-util = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+rayls-infrastructure-types = { workspace = true }
+rayls-execution-evm = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+tokio-stream = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+eyre = { workspace = true, optional = true }
+rayls-infrastructure-storage = { workspace = true }
+
+[dev-dependencies]
+indexmap = { workspace = true }
+rayls-testing-test-utils = { workspace = true }
+rayls-batch-builder = { workspace = true, features = ["test-utils"] }
+rayls-infrastructure-types = { workspace = true, features = ["test-utils"] }
+rayls-middleware-processor = { workspace = true, features = ["test-utils"] }
+tempfile = { workspace = true }
+rayls-execution-evm = { workspace = true, features = ["test-utils"] }
+rayls-consensus-primary = { workspace = true, features = ["test-utils"] }
+rayls-infrastructure-config = { workspace = true, features = ["test-utils"] }
+rayls-middleware-rewards = { workspace = true }
+assert_matches = { workspace = true }
+
+[features]
+default = []
+test-utils = ["dep:eyre"]
+
+[lints]
+workspace = true

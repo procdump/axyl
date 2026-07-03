@@ -1,0 +1,43 @@
+[package]
+name = "rayls-infrastructure-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "BUSL-1.1"
+homepage.workspace = true
+repository.workspace = true
+publish = false
+authors = [
+]
+
+[dependencies]
+tracing = { workspace = true }
+rayls-infrastructure-network-types = { workspace = true }
+rayls-infrastructure-storage = { workspace = true }
+rayls-infrastructure-types = { workspace = true }
+eyre = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+serde_json = { workspace = true }
+# Use reth directly to avoid circular deps.
+reth-chainspec = { workspace = true }
+humantime-serde = { workspace = true }
+libp2p = { workspace = true, features = ["request-response", "kad"] }
+backoff = { workspace = true }
+bs58 = { workspace = true }
+
+# Crypto specific to key wrapping, not used elsewhere.
+aes-gcm-siv = "0.11.1"
+pbkdf2 = "0.12.2"
+sha2 = "0.10.8"
+
+[features]
+default = []
+test-utils = []
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

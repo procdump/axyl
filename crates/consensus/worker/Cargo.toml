@@ -1,0 +1,46 @@
+[package]
+name = "rayls-consensus-worker"
+version.workspace = true
+license = "BUSL-1.1"
+authors = [
+]
+edition = "2021"
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+tracing = { workspace = true }
+
+rayls-infrastructure-storage = { workspace = true }
+rayls-infrastructure-network-types = { workspace = true }
+rayls-infrastructure-types = { workspace = true }
+rayls-infrastructure-config = { workspace = true }
+prometheus = { workspace = true }
+
+eyre = { workspace = true }
+rayls-consensus-network = { workspace = true }
+serde = { workspace = true }
+consensus-metrics = { workspace = true }
+rand = { workspace = true, optional = true }
+
+[dev-dependencies]
+rayls-batch-validator = { workspace = true, features = ["test-utils"] }
+tempfile = { workspace = true }
+rayls-execution-evm = { workspace = true, features = ["test-utils"] }
+rayls-infrastructure-types = { workspace = true, features = ["test-utils"] }
+rayls-testing-test-utils = { workspace = true }
+rayls-consensus-worker = { workspace = true, features = ["test-utils"] }
+assert_matches = { workspace = true }
+indexmap = { workspace = true }
+
+[features]
+default = []
+test-utils = ["dep:rand"]
+# Single-node / local dev chain behavior (quorum without peer acks on sole-member committee).
+dev-single-node-setup = []
+
+[lints]
+workspace = true

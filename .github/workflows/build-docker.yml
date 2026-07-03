@@ -1,0 +1,184 @@
+name: Build & Push Docker Image
+
+# Builds the node-client image and pushes it to private ECR.
+#
+# Three entry points:
+#   * push tag v*          -> automatic devnet release: builds `devnet-<tag>`
+#                             (e.g. v1.2.3 -> devnet-v1.2.3). This is the
+#                             single build that promote-docker.yml later
+#                             re-tags to testnet/mainnet by digest.
+#   * workflow_dispatch     -> manual build from any branch/tag with an
+#                             arbitrary image tag (ad-hoc / debugging).
+#   * workflow_call         -> reusable: promote-docker.yml calls this to
+#                             REBUILD for a hard fork (new chainspec.rs block).
+#
+# Every image is stamped with the source commit via the OCI label
+# `org.opencontainers.image.revision`. promote-docker.yml reads it back to
+# decide whether a re-tag is safe or a rebuild is required.
+
+on:
+  push:
+    tags:
+      - 'v*'       # prod releases: v1.0.0, v1.2.3, etc. -> devnet-<tag>
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to push (e.g., devnet-v1.0.0 or dev-manual)'
+        required: true
+      ref:
+        description: 'Git ref/branch/SHA to build from (default: this workflow ref)'
+        required: false
+        default: ''
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Image tag to push'
+        required: true
+        type: string
+      ref:
+        description: 'Git ref/branch/SHA to build from'
+        required: false
+        type: string
+        default: ''
+
+env:
+  IMAGE_NAME: rayls-stack-node-client
+  DOCKERFILE: etc/docker-network/Dockerfile
+
+jobs:
+  # ===========================================================================
+  # BUILD - Build Docker image and push to private ECR
+  # ===========================================================================
+  build-and-push:
+    name: Build and Push to ECR
+    runs-on: ubuntu-latest-m
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
+      environment: ${{ steps.meta.outputs.environment }}
+      commit: ${{ steps.meta.outputs.sha }}
+    env:
+      ECR_PRIVATE_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION_PRIVATE }}.amazonaws.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 1
+
+      - name: Extract tag and determine environment
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Automatic release on a v* tag -> devnet image.
+            VERSION="${GITHUB_REF#refs/tags/}"
+            TAG="devnet-$VERSION"
+          else
+            # workflow_dispatch / workflow_call -> caller-supplied tag, as-is.
+            TAG="$INPUT_TAG"
+          fi
+
+          SHA="$(git rev-parse HEAD)"
+          SHORT="$(git rev-parse --short HEAD)"
+
+          echo "version=$TAG" >> $GITHUB_OUTPUT
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "short_sha=$SHORT" >> $GITHUB_OUTPUT
+
+          if [[ "$TAG" == devnet-v* || "$TAG" == testnet-v* || "$TAG" == mainnet-v* || "$TAG" == v* ]]; then
+            echo "environment=prod" >> $GITHUB_OUTPUT
+            echo "### Release Build" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "environment=dev" >> $GITHUB_OUTPUT
+            echo "### Development Build" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          {
+            echo ""
+            echo "**Image tag:** \`$TAG\`"
+            echo "**Built from commit:** \`$SHORT\` ($SHA)"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION_PRIVATE }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@fa648b43de3d4d023bcb3f89ed6940096949c419 # v2.1.5
+
+      - name: Create ECR repository if not exists
+        run: |
+          if ! aws ecr describe-repositories --repository-names "${{ env.IMAGE_NAME }}" 2>/dev/null; then
+            aws ecr create-repository --repository-name "${{ env.IMAGE_NAME }}"
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: ./${{ env.DOCKERFILE }}
+          push: true
+          tags: ${{ env.ECR_PRIVATE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          build-args: |
+            VERGEN_GIT_SHA=${{ steps.meta.outputs.sha }}
+          # Stamp the source commit so promote-docker.yml can verify provenance
+          # and decide re-tag vs rebuild for hard forks.
+          labels: |
+            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          provenance: false
+          # Cache might be risky, we might re-use cached layer when we should not
+          # cache-from: type=gha
+          # cache-to: type=gha,mode=max
+
+  # ===========================================================================
+  # SECURITY SCAN - Trivy vulnerability scanning on the built image
+  # ===========================================================================
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest-m
+    needs: build-and-push
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ECR_PRIVATE_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION_PRIVATE }}.amazonaws.com
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION_PRIVATE }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@fa648b43de3d4d023bcb3f89ed6940096949c419 # v2.1.5
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.ECR_PRIVATE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image-tag }}
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          scanners: 'vuln,misconfig'
+          severity: 'HIGH,CRITICAL'
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Docker Image Build" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.ECR_PRIVATE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image-tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ needs.build-and-push.outputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Built from commit:** \`${{ needs.build-and-push.outputs.commit }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Security scan:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

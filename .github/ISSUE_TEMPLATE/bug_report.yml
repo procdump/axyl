@@ -1,0 +1,102 @@
+name: Bug Report
+description: File a bug report for Axyl
+title: "[Bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report.
+
+        Before filing:
+        - Search existing issues to avoid duplicates.
+        - For security-sensitive issues, **do not** file a public bug — see [SECURITY.md](../SECURITY.md).
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear and concise description of the bug, including the actual behaviour you observed.
+      placeholder: When I did X, Y happened. I expected Z.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How can it be reproduced?
+      description: Minimal steps, commands, RPC calls, or config snippets that reproduce the issue. If logs are relevant, paste the smallest excerpt that shows the failure.
+      placeholder: |
+        1. Start a validator with `rayls-network node --chain testnet ...`
+        2. Submit transaction X via `eth_sendRawTransaction`
+        3. Observe ...
+    validations:
+      required: true
+  - type: dropdown
+    id: chain
+    attributes:
+      label: Chain
+      description: Which network were you running against?
+      options:
+        - testnet
+        - mainnet
+        - local (test-network / docker-network)
+        - other (specify in "Anything else")
+    validations:
+      required: true
+  - type: dropdown
+    id: node-type
+    attributes:
+      label: Node type
+      description: What role was the node playing when the bug occurred?
+      options:
+        - validator (CvvActive)
+        - validator (CvvInactive / catching up)
+        - observer
+        - genesis ceremony / keytool
+        - not running a node (e.g. tooling, smart-contract operation)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `rayls-network --version`, the git SHA you built from, or the Docker image tag.
+      placeholder: "rayls-network 1.1.1 (sha:abcdef0) — or — rayls-stack-node-client:dev-20260524"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Host OS
+      options:
+        - Linux (Ubuntu / Debian)
+        - Linux (other)
+        - macOS
+        - Windows (WSL2)
+        - Windows (native)
+        - Inside Docker / Compose
+    validations:
+      required: true
+  - type: textarea
+    id: storage
+    attributes:
+      label: Storage configuration
+      description: Were you using `--storage.v2`? `--full`? Any custom `--datadir`, `--txpool.*`, or `--metrics` flags? Paste the relevant `rayls-network node` arguments if non-default.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: |
+        Paste log lines from the time of the failure. `-vvv` (INFO) or `-vvvv` (DEBUG) output is ideal. Redact any private keys, passphrases, or operator-specific addresses before pasting.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Workarounds, related issues, suspected root cause, anything else that might help triage.
+    validations:
+      required: false

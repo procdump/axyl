@@ -1,0 +1,31 @@
+[package]
+name = "rayls-consensus-state-sync"
+version.workspace = true
+edition = "2021"
+license = "BUSL-1.1"
+authors = [
+]
+publish = false
+
+[dependencies]
+eyre = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+rayls-infrastructure-storage = { workspace = true }
+
+rayls-infrastructure-types = { workspace = true }
+rayls-infrastructure-config = { workspace = true }
+rayls-consensus-primary = { workspace = true }
+consensus-metrics.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }
+rayls-infrastructure-storage = { workspace = true }
+rayls-infrastructure-types = { workspace = true, features = ["test-utils"] }
+rayls-consensus-primary = { workspace = true, features = ["test-utils"] }
+rayls-testing-test-utils-committee = { workspace = true }
+roaring = { workspace = true }
+
+[lints]
+workspace = true

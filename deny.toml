@@ -1,0 +1,61 @@
+# cargo-deny configuration — supply-chain gating for the Rayls Network workspace.
+# Run locally / in CI with:  cargo deny check
+# Docs: https://embarkstudios.github.io/cargo-deny/
+#
+# NOTE: the license `allow` list below covers the common permissive licenses
+# in our dependency tree. The first `cargo deny check licenses` run may surface
+# a few stragglers (e.g. ring / aws-lc-sys ship non-SPDX LICENSE files and may
+# need a `[[licenses.clarify]]` block or an entry in `exceptions`). Add them as
+# they appear rather than loosening `confidence-threshold`.
+
+[advisories]
+# v2: vulnerabilities and unsound advisories error by default; unmaintained and
+# yanked crates warn. Add RUSTSEC IDs here (with a comment + justification) to
+# temporarily accept a finding.
+version = 2
+ignore = []
+
+[licenses]
+# v2: any license not in `allow` is rejected.
+version = 2
+confidence-threshold = 0.8
+allow = [
+    # BUSL-1.1 is THIS project's own license (first-party Rayls crates), not a third-party
+    # dependency license. Required so `cargo deny check licenses` accepts our workspace crates.
+    "BUSL-1.1",
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "OpenSSL",
+    # MPL-2.0 is weak (file-level) copyleft — permitted, but review new MPL deps.
+    "MPL-2.0",
+    # Linux Foundation permissive license; used by rustls webpki-roots / webpki-root-certs.
+    # Originally drafted for data; functionally permissive (attribution-only, no copyleft).
+    "CDLA-Permissive-2.0",
+]
+# Per-crate license exceptions go here, e.g.:
+# exceptions = [{ name = "some-crate", allow = ["LicenseRef-Custom"] }]
+exceptions = []
+
+[bans]
+# Workspaces routinely pull duplicate transitive versions; surface but don't fail.
+multiple-versions = "warn"
+wildcards = "warn"
+highlight = "all"
+
+[sources]
+# Tighten to "deny" once all git/registry sources are enumerated below.
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

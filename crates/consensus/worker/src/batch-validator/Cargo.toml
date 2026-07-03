@@ -1,0 +1,33 @@
+[package]
+name = "rayls-batch-validator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors = [
+]
+
+[dependencies]
+async-trait = { workspace = true }
+rayls-infrastructure-types = { workspace = true }
+rayls-execution-evm = { workspace = true }
+rayon = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+rustc-hash = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+assert_matches = { workspace = true }
+serial_test = { workspace = true }
+rayls-execution-evm = { workspace = true, features = ["test-utils"] }
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[features]
+default = []
+test-utils = []
+
+[lints]
+workspace = true

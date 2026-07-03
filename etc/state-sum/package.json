@@ -1,0 +1,11 @@
+{
+  "name": "state-sum-tools",
+  "private": true,
+  "version": "0.1.0",
+  "license": "BUSL-1.1",
+  "type": "module",
+  "description": "Auxiliary Node.js scripts that exercise USDR mint/burn against a running chain — used to demonstrate the supply-correction hardfork end-to-end on a local devnet. The primary audit binary (state-sum) is the Rust crate alongside; these scripts are for interactive testing, not for the audit itself.",
+  "dependencies": {
+    "ethers": "6.15.0"
+  }
+}

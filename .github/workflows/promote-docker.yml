@@ -1,0 +1,310 @@
+name: Promote Docker Image
+
+# Promotes a release image up the ladder: devnet -> testnet -> mainnet.
+#
+#   devnet-v1.2.3  --promote-->  testnet-v1.2.3  --promote-->  mainnet-v1.2.3
+#
+# Two strategies, chosen automatically:
+#
+#   * RE-TAG (default, no rebuild): server-side manifest copy of the source
+#     tag to the target tag. Same digest, same binary. Valid because the node
+#     selects its network (devnet/testnet/mainnet) at RUNTIME — a single binary
+#     bakes in every network's hardfork schedule (see chainspec.rs
+#     RaylsHardFork::for_network). So the devnet image already contains the
+#     testnet/mainnet schedules as compiled at tag time.
+#
+#   * REBUILD (hard forks): when you set a testnet/mainnet activation block you
+#     edit crates/execution/evm/src/chainspec.rs and commit it AFTER the tag was
+#     built. That changes the binary, so the existing devnet image is stale for
+#     the new network. Pass that commit/branch as `rebuild_ref` and this
+#     workflow rebuilds from it (via build-docker.yml) and tags the target.
+#
+# The build commit is stamped into every image (org.opencontainers.image.revision)
+# and surfaced here so you can double-check the right code was promoted.
+#
+# APPROVAL GATE: gated by trstringer/manual-approval (issue-comment based) while
+# we are a private/non-enterprise repo where GitHub Environment protection rules
+# are unavailable. Toggle with repo variable ENABLE_MANUAL_APPROVAL ('true'/'false').
+# When we go public: delete the `approval` job and add `environment: <stage>`
+# (with required reviewers / CODEOWNERS) to the `retag` and `rebuild` jobs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to promote, without stage prefix (e.g. v1.2.3)'
+        required: true
+      target:
+        description: 'Target stage'
+        required: true
+        type: choice
+        options:
+          - testnet
+          - mainnet
+      rebuild_ref:
+        description: 'HARD FORK ONLY: commit/branch with the updated chainspec.rs to rebuild from. Leave empty for a normal re-tag promotion.'
+        required: false
+        default: ''
+
+env:
+  IMAGE_NAME: rayls-stack-node-client
+  CHAINSPEC: crates/execution/evm/src/chainspec.rs
+
+jobs:
+  # ===========================================================================
+  # PLAN - resolve tags, read source provenance, decide re-tag vs rebuild.
+  # Read-only: safe to run before approval.
+  # ===========================================================================
+  plan:
+    name: Plan ${{ inputs.version }} -> ${{ inputs.target }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      source_tag: ${{ steps.tags.outputs.source_tag }}
+      target_tag: ${{ steps.tags.outputs.target_tag }}
+      mode: ${{ steps.plan.outputs.mode }}
+      source_commit: ${{ steps.source.outputs.commit }}
+      source_digest: ${{ steps.source.outputs.digest }}
+    env:
+      ECR_PRIVATE_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION_PRIVATE }}.amazonaws.com
+    steps:
+      - name: Checkout (full history for chainspec diff)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve source and target tags
+        id: tags
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.+].*)?$ ]]; then
+            echo "::error::version must look like v1.2.3 (got: $VERSION)"
+            exit 1
+          fi
+
+          case "$TARGET" in
+            testnet) SOURCE_TAG="devnet-$VERSION"  ;;
+            mainnet) SOURCE_TAG="testnet-$VERSION" ;;
+            *) echo "::error::unknown target $TARGET"; exit 1 ;;
+          esac
+          TARGET_TAG="$TARGET-$VERSION"
+
+          echo "source_tag=$SOURCE_TAG" >> $GITHUB_OUTPUT
+          echo "target_tag=$TARGET_TAG" >> $GITHUB_OUTPUT
+
+          {
+            echo "## Image Promotion"
+            echo ""
+            echo "**Source:** \`$SOURCE_TAG\`"
+            echo "**Target:** \`$TARGET_TAG\`"
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION_PRIVATE }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@fa648b43de3d4d023bcb3f89ed6940096949c419 # v2.1.5
+
+      - name: Verify source image exists, capture digest and build commit
+        id: source
+        env:
+          SOURCE_TAG: ${{ steps.tags.outputs.source_tag }}
+        run: |
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "$IMAGE_NAME" \
+            --image-ids "imageTag=$SOURCE_TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text 2>/dev/null || true)
+
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "None" ]; then
+            echo "::error::source tag $SOURCE_TAG not found in ECR. Promote devnet->testnet before testnet->mainnet."
+            exit 1
+          fi
+
+          # Read the commit the source image was built from (stamped at build time).
+          COMMIT=$(docker buildx imagetools inspect \
+            "$ECR_PRIVATE_REGISTRY/$IMAGE_NAME:$SOURCE_TAG" \
+            --format '{{ index .Image.Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)
+
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+          {
+            echo "**Source digest:** \`$DIGEST\`"
+            echo "**Source built from commit:** \`${COMMIT:-unknown}\`"
+          } >> $GITHUB_STEP_SUMMARY
+
+          #- name: Fail if target tag already exists
+          #  env:
+          #    TARGET_TAG: ${{ steps.tags.outputs.target_tag }}
+          #  run: |
+          #    if aws ecr describe-images \
+          #        --repository-name "$IMAGE_NAME" \
+          #        --image-ids "imageTag=$TARGET_TAG" \
+          #        --query 'imageDetails[0].imageDigest' \
+          #        --output text 2>/dev/null | grep -q sha256; then
+          #      echo "::error::target tag $TARGET_TAG already exists. Refusing to overwrite — delete it manually if you really mean to re-promote."
+          #      exit 1
+          #    fi
+
+      - name: Decide promotion strategy (re-tag vs rebuild)
+        id: plan
+        env:
+          REBUILD_REF: ${{ inputs.rebuild_ref }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+        run: |
+          if [ -z "$REBUILD_REF" ]; then
+            echo "mode=retag" >> $GITHUB_OUTPUT
+            {
+              echo ""
+              echo "**Strategy:** re-tag (same digest, no rebuild)"
+            } >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          echo "mode=rebuild" >> $GITHUB_OUTPUT
+
+          # Sanity check: did chainspec.rs actually change vs the source build?
+          # (rebuild proceeds regardless — this is a double-check, not a gate.)
+          CHANGED="unknown"
+          if [ -n "$SOURCE_COMMIT" ]; then
+            git fetch --no-tags --depth=1 origin "$REBUILD_REF" 2>/dev/null || git fetch origin "$REBUILD_REF" 2>/dev/null || true
+            git fetch origin "$SOURCE_COMMIT" 2>/dev/null || true
+            REF_SHA=$(git rev-parse "FETCH_HEAD" 2>/dev/null || git rev-parse "$REBUILD_REF" 2>/dev/null || echo "$REBUILD_REF")
+            if git cat-file -e "$SOURCE_COMMIT" 2>/dev/null; then
+              if git diff --quiet "$SOURCE_COMMIT" "$REF_SHA" -- "$CHAINSPEC" 2>/dev/null; then
+                CHANGED="no"
+              else
+                CHANGED="yes"
+              fi
+            fi
+          fi
+
+          {
+            echo ""
+            echo "**Strategy:** REBUILD from \`$REBUILD_REF\`"
+            echo "**chainspec.rs changed vs source build:** $CHANGED"
+          } >> $GITHUB_STEP_SUMMARY
+
+          if [ "$CHANGED" = "no" ]; then
+            echo "::warning::rebuild_ref was supplied but $CHAINSPEC is identical to the source image's build commit ($SOURCE_COMMIT). A re-tag would have produced the same binary — double-check you passed the right ref."
+          fi
+
+  # ===========================================================================
+  # APPROVAL GATE - issue-comment based, for private/non-enterprise repos.
+  # Remove this whole job and use `environment:` protection once public.
+  # ===========================================================================
+  approval:
+    name: Manual approval
+    needs: plan
+    runs-on: ubuntu-latest
+    if: ${{ vars.ENABLE_MANUAL_APPROVAL == 'true' }}
+    permissions:
+      issues: write
+    steps:
+      - name: Await approver
+        uses: trstringer/manual-approval@74d99dff7380e3e4b122d4ededcbca2b6ce59367 # v1.12.0
+        with:
+          secret: ${{ github.token }}
+          approvers: ${{ vars.PROMOTE_APPROVERS }}
+          minimum-approvals: 1
+          issue-title: "Promote ${{ needs.plan.outputs.source_tag }} -> ${{ needs.plan.outputs.target_tag }}"
+          issue-body: >
+            Approve to promote **${{ needs.plan.outputs.source_tag }}** to
+            **${{ needs.plan.outputs.target_tag }}** (strategy: ${{ needs.plan.outputs.mode }},
+            source commit: ${{ needs.plan.outputs.source_commit }}).
+            Comment `approved`, `approve`, `lgtm` or `yes` to proceed; `denied` to reject.
+          exclude-workflow-initiator-as-approver: false
+
+  # ===========================================================================
+  # RE-TAG - server-side manifest copy, preserves the digest. Default path.
+  # ===========================================================================
+  retag:
+    name: Re-tag (no rebuild)
+    needs: [plan, approval]
+    runs-on: ubuntu-latest
+    # Runs when approval passed OR was skipped (gate disabled). !failure() blocks
+    # this if approval was denied (the approval job fails on rejection).
+    if: ${{ !failure() && !cancelled() && needs.plan.outputs.mode == 'retag' }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ECR_PRIVATE_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION_PRIVATE }}.amazonaws.com
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e7f100cf4c008499ea8adda475de1042d6975c7b # v6.2.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION_PRIVATE }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@fa648b43de3d4d023bcb3f89ed6940096949c419 # v2.1.5
+
+      - name: Re-tag image (digest-preserving ECR manifest copy)
+        env:
+          SOURCE_TAG: ${{ needs.plan.outputs.source_tag }}
+          TARGET_TAG: ${{ needs.plan.outputs.target_tag }}
+        run: |
+          MANIFEST=$(aws ecr batch-get-image \
+            --repository-name "$IMAGE_NAME" \
+            --image-ids "imageTag=$SOURCE_TAG" \
+            --query 'images[0].imageManifest' \
+            --output text)
+          MEDIA_TYPE=$(aws ecr batch-get-image \
+            --repository-name "$IMAGE_NAME" \
+            --image-ids "imageTag=$SOURCE_TAG" \
+            --query 'images[0].imageManifestMediaType' \
+            --output text)
+
+          aws ecr put-image \
+            --repository-name "$IMAGE_NAME" \
+            --image-tag "$TARGET_TAG" \
+            --image-manifest "$MANIFEST" \
+            --image-manifest-media-type "$MEDIA_TYPE"
+
+      - name: Verify target digest matches source
+        env:
+          SOURCE_DIGEST: ${{ needs.plan.outputs.source_digest }}
+          TARGET_TAG: ${{ needs.plan.outputs.target_tag }}
+        run: |
+          TARGET_DIGEST=$(aws ecr describe-images \
+            --repository-name "$IMAGE_NAME" \
+            --image-ids "imageTag=$TARGET_TAG" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+
+          {
+            echo "**Target digest:** \`$TARGET_DIGEST\`"
+          } >> $GITHUB_STEP_SUMMARY
+
+          if [ "$SOURCE_DIGEST" != "$TARGET_DIGEST" ]; then
+            echo "::error::digest mismatch after re-tag (source=$SOURCE_DIGEST target=$TARGET_DIGEST)"
+            exit 1
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Digests match — same image promoted." >> $GITHUB_STEP_SUMMARY
+
+  # ===========================================================================
+  # REBUILD - hard-fork path: rebuild from rebuild_ref and tag the target.
+  # Delegates to build-docker.yml so build logic lives in one place.
+  # ===========================================================================
+  rebuild:
+    name: Rebuild for hard fork
+    needs: [plan, approval]
+    if: ${{ !failure() && !cancelled() && needs.plan.outputs.mode == 'rebuild' }}
+    uses: ./.github/workflows/build-docker.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      tag: ${{ needs.plan.outputs.target_tag }}
+      ref: ${{ inputs.rebuild_ref }}
+    secrets: inherit

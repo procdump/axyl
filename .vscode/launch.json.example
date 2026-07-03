@@ -1,0 +1,94 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Launch node",
+            "cargo": {
+                "args": ["build"],
+                "filter": {
+                    "kind": "bin",
+                    "name": "rayls-network"
+                },
+                "env": {
+                    "RUSTFLAGS": "-C target-cpu=native"
+                }
+            },
+            "program": "${workspaceRoot}/target/debug/rayls-network",
+            "args": [
+                "node",
+                "--datadir", "${workspaceRoot}/etc/debug-network/local-validators/validator-1",
+                "--instance", "1",
+                "--metrics", "127.0.0.1:9300",
+                "--log.stdout.format", "log-fmt",
+                "--full",
+                "--storage.v2",
+                "--db.growth-step", "1MB",
+                "--consensus-db.growth-step", "1MB",
+                "--txpool.pending-max-count", "1000000",
+                "--txpool.pending-max-size", "1242880000",
+                "--txpool.basefee-max-count", "1000000",
+                "--txpool.basefee-max-size", "20971120000",
+                "--txpool.queued-max-count", "1000000",
+                "--txpool.queued-max-size", "20971120000",
+                "--txpool.max-pending-txns", "1000000",
+                "--txpool.max-new-txns", "1000000",
+                "--txpool.minimal-protocol-fee", "0",
+                "--txpool.max-tx-input-bytes", "999999999999",
+                "--txpool.max-account-slots", "1000000",
+                "-vvv",
+                "--http.addr", "0.0.0.0",
+                "--http",
+                "--http.api", "all",
+            ],
+            "cwd": "${workspaceRoot}",
+            "env": {"RL_BLS_PASSPHRASE": "local", "RPC_PORT": "8545", "RUST_BACKTRACE": "1"},
+            "terminal": "integrated",
+            "sourceLanguages": ["rust"]
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug integration tests",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--package=rayls-consensus-network",
+                    "--test=it"
+                ],
+                "filter": {
+                    "name": "it",
+                    "kind": "test"
+                }
+            },
+            "args": [
+                "test_score_decay_and_reconnection", 
+                "--nocapture"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--package=rayls-consensus-primary",
+                    "--lib"
+                ],
+                "filter": {
+                    "kind": "lib"
+                }
+            },
+            "args": [
+                "committed_round_after_restart", 
+                "--nocapture"
+            ],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

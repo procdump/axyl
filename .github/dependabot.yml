@@ -1,0 +1,80 @@
+# Dependabot configuration.
+#
+# See https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Scope:
+#   - Cargo workspace at the repo root (production Rust deps).
+#   - GitHub Actions versions used by .github/workflows/*.
+#
+# Out of scope for now:
+#   - The fuzz crate's isolated workspace (crates/testing/fuzz-targets/fuzz/) —
+#     its lockfile is committed deliberately and pinned to libfuzzer-sys
+#     versions known to work with our nightly toolchain. Dependabot would
+#     produce noisy PRs that we would mostly close.
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    # Wait at least 2 days after a release before opening an update PR, so the
+    # ecosystem has time to flag malicious or broken versions.
+    cooldown:
+      default-days: 2
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: "Europe/Lisbon"
+    # 0 disables routine version-update PRs for this ecosystem while keeping
+    # the config valid. Dependabot alerts and security-update PRs are
+    # unaffected (those are settings-driven, not gated by this limit).
+    open-pull-requests-limit: 0
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    groups:
+      # Group reth-* into one PR — they always need to move together
+      # because we depend on them with a shared `tag = "v1.11.0"` pin.
+      reth:
+        patterns:
+          - "reth*"
+      # Same for alloy-*.
+      alloy:
+        patterns:
+          - "alloy*"
+      # Group all tracing crates so the version skew doesn't fight us
+      # in PRs.
+      tracing:
+        patterns:
+          - "tracing*"
+      # Catch-all for minor / patch bumps so we get one PR per week
+      # rather than dozens.
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    # Wait at least 2 days after a release before opening an update PR, so the
+    # ecosystem has time to flag malicious or broken versions.
+    cooldown:
+      default-days: 2
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: "Europe/Lisbon"
+    # 0 disables routine version-update PRs for this ecosystem while keeping
+    # the config valid. Dependabot alerts and security-update PRs are
+    # unaffected (those are settings-driven, not gated by this limit).
+    open-pull-requests-limit: 0
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "chore(ci)"
+      include: scope

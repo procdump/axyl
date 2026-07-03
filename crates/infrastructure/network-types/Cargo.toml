@@ -1,0 +1,27 @@
+[package]
+name = "rayls-infrastructure-network-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors = [
+]
+description = "Commonly used types in rayls network's internal network communication."
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rayls-infrastructure-types = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+eyre = { workspace = true }
+parking_lot = { workspace = true }
+
+[build-dependencies]
+rustversion = "1.0.9"
+
+[lints]
+workspace = true

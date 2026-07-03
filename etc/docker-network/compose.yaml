@@ -1,0 +1,206 @@
+services:
+  # build image once
+  rayls-base:
+    image: local-rayls-network:latest
+    build:
+      context: ../../
+      dockerfile: etc/docker-network/Dockerfile
+
+  # use built image for all 4 services
+  setup1:
+    image: local-rayls-network:latest
+    depends_on:
+      rayls-base:
+        condition: service_started
+    environment:
+      - RL_EXTERNAL_PRIMARY_ADDR=/ip4/10.10.0.21/udp/49590/quic-v1
+      - RL_EXTERNAL_WORKER_ADDRS=/ip4/10.10.0.21/udp/49595/quic-v1
+      - EXECUTION_ADDRESS=0x1111111111111111111111111111111111111111
+      - RL_BLS_PASSPHRASE=local
+    user: "root"
+    command:
+      - "bash"
+      - "/setup_validator.sh"
+    volumes:
+      - ./setup_validator.sh:/setup_validator.sh
+      - validator1-data:/home/nonroot/data
+  setup2:
+    image: local-rayls-network:latest
+    depends_on:
+      rayls-base:
+        condition: service_started
+    environment:
+      - RL_EXTERNAL_PRIMARY_ADDR=/ip4/10.10.0.22/udp/49590/quic-v1
+      - RL_EXTERNAL_WORKER_ADDRS=/ip4/10.10.0.22/udp/49595/quic-v1
+      - EXECUTION_ADDRESS=0x2222222222222222222222222222222222222222
+      - RL_BLS_PASSPHRASE=local
+    user: "root"
+    command:
+      - "bash"
+      - "/setup_validator.sh"
+    volumes:
+      - ./setup_validator.sh:/setup_validator.sh
+      - validator2-data:/home/nonroot/data
+  setup3:
+    image: local-rayls-network:latest
+    depends_on:
+      rayls-base:
+        condition: service_started
+    environment:
+      - RL_EXTERNAL_PRIMARY_ADDR=/ip4/10.10.0.23/udp/49590/quic-v1
+      - RL_EXTERNAL_WORKER_ADDRS=/ip4/10.10.0.23/udp/49595/quic-v1
+      - EXECUTION_ADDRESS=0x3333333333333333333333333333333333333333
+      - RL_BLS_PASSPHRASE=local
+    user: "root"
+    command:
+      - "bash"
+      - "/setup_validator.sh"
+    volumes:
+      - ./setup_validator.sh:/setup_validator.sh
+      - validator3-data:/home/nonroot/data
+  setup4:
+    image: local-rayls-network:latest
+    depends_on:
+      rayls-base:
+        condition: service_started
+    environment:
+      - RL_EXTERNAL_PRIMARY_ADDR=/ip4/10.10.0.24/udp/49590/quic-v1
+      - RL_EXTERNAL_WORKER_ADDRS=/ip4/10.10.0.24/udp/49595/quic-v1
+      - EXECUTION_ADDRESS=0x4444444444444444444444444444444444444444
+      - RL_BLS_PASSPHRASE=local
+    user: "root"
+    command:
+      - "bash"
+      - "/setup_validator.sh"
+    volumes:
+      - ./setup_validator.sh:/setup_validator.sh
+      - validator4-data:/home/nonroot/data
+
+  # create and distribute committee / worker cache files
+  comittee:
+    image: local-rayls-network:latest
+    environment:
+      - RL_BLS_PASSPHRASE=local
+      - GASLESS=${GASLESS:-}
+      - GAS_LIMIT=${GAS_LIMIT:-}
+    user: "root"
+    command:
+      - "bash"
+      - "/genesis.sh"
+    depends_on:
+      setup1:
+        condition: service_completed_successfully
+      setup2:
+        condition: service_completed_successfully
+      setup3:
+        condition: service_completed_successfully
+      setup4:
+        condition: service_completed_successfully
+    volumes:
+      - ./genesis.sh:/genesis.sh
+      - sharedgenesisdir:/home/nonroot/data/genesis
+      - validator1-data:/home/nonroot/data/validator-1
+      - validator2-data:/home/nonroot/data/validator-2
+      - validator3-data:/home/nonroot/data/validator-3
+      - validator4-data:/home/nonroot/data/validator-4
+
+  # start nodes
+  validator1:
+    image: local-rayls-network:latest
+    depends_on:
+      comittee:
+        condition: service_completed_successfully
+    environment:
+      - RUST_LOG=info,execution=debug
+      - RL_BLS_PASSPHRASE=local
+      - RAYLS_NETWORK=devnet
+      - PRIMARY_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49590/quic-v1
+      - WORKER_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49595/quic-v1 # must match value used in setup1 service
+    user: "1101:1101"
+    command: >
+      /usr/local/bin/rayls node --datadir /home/nonroot/data --metrics 127.0.0.1:9101 --log.stdout.format log-fmt --full --storage.v2 --txpool.pending-max-count 50000 --txpool.pending-max-size 62144000 --txpool.basefee-max-count 50000 --txpool.basefee-max-size 1048556000 --txpool.queued-max-count 50000 --txpool.queued-max-size 1048556000 --txpool.max-pending-txns 50000 --txpool.max-new-txns 50000 --txpool.minimal-protocol-fee 0 --txpool.gas-limit 999999999999 --txpool.max-tx-gas 999999999999 --txpool.max-tx-input-bytes 999999999999 --txpool.max-account-slots 50000 --gpo.default-suggested-fee 0 --http --http.addr 0.0.0.0 --http.api all
+    ports:
+      - 7545:8545
+    volumes:
+      - validator1-data:/home/nonroot/data
+    networks:
+      validators:
+        ipv4_address: 10.10.0.21
+  validator2:
+    image: local-rayls-network:latest
+    depends_on:
+      comittee:
+        condition: service_completed_successfully
+    environment:
+      - RUST_LOG=info,execution=debug
+      - RL_BLS_PASSPHRASE=local
+      - RAYLS_NETWORK=devnet
+      - PRIMARY_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49590/quic-v1
+      - WORKER_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49595/quic-v1 # must match value used in setup2 service
+    user: "1101:1101"
+    command: >
+      /usr/local/bin/rayls node --datadir /home/nonroot/data --metrics 127.0.0.1:9101 --log.stdout.format log-fmt --full --storage.v2 --txpool.pending-max-count 50000 --txpool.pending-max-size 62144000 --txpool.basefee-max-count 50000 --txpool.basefee-max-size 1048556000 --txpool.queued-max-count 50000 --txpool.queued-max-size 1048556000 --txpool.max-pending-txns 50000 --txpool.max-new-txns 50000 --txpool.minimal-protocol-fee 0 --txpool.gas-limit 999999999999 --txpool.max-tx-gas 999999999999 --txpool.max-tx-input-bytes 999999999999 --txpool.max-account-slots 50000 --gpo.default-suggested-fee 0 --http --http.addr 0.0.0.0 --http.api all
+    ports:
+      - 7544:8545
+    volumes:
+      - validator2-data:/home/nonroot/data
+    networks:
+      validators:
+        ipv4_address: 10.10.0.22
+  validator3:
+    image: local-rayls-network:latest
+    depends_on:
+      comittee:
+        condition: service_completed_successfully
+    environment:
+      - RUST_LOG=info,execution=debug
+      - RL_BLS_PASSPHRASE=local
+      - RAYLS_NETWORK=devnet
+      - PRIMARY_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49590/quic-v1
+      - WORKER_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49595/quic-v1 # must match value used in setup3 service
+    user: "1101:1101"
+    command: >
+      /usr/local/bin/rayls node --datadir /home/nonroot/data --metrics 127.0.0.1:9101 --log.stdout.format log-fmt --full --storage.v2 --txpool.pending-max-count 50000 --txpool.pending-max-size 62144000 --txpool.basefee-max-count 50000 --txpool.basefee-max-size 1048556000 --txpool.queued-max-count 50000 --txpool.queued-max-size 1048556000 --txpool.max-pending-txns 50000 --txpool.max-new-txns 50000 --txpool.minimal-protocol-fee 0 --txpool.gas-limit 999999999999 --txpool.max-tx-gas 999999999999 --txpool.max-tx-input-bytes 999999999999 --txpool.max-account-slots 50000 --gpo.default-suggested-fee 0 --http --http.addr 0.0.0.0 --http.api all
+    ports:
+      - 7543:8545
+    volumes:
+      - validator3-data:/home/nonroot/data
+    networks:
+      validators:
+        ipv4_address: 10.10.0.23
+  validator4:
+    image: local-rayls-network:latest
+    depends_on:
+      comittee:
+        condition: service_completed_successfully
+    environment:
+      - RUST_LOG=info,execution=debug
+      - RL_BLS_PASSPHRASE=local
+      - RAYLS_NETWORK=devnet
+      - PRIMARY_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49590/quic-v1
+      - WORKER_LISTENER_MULTIADDR=/ip4/0.0.0.0/udp/49595/quic-v1 # must match value used in setup4 service
+    user: "1101:1101"
+    command: >
+      /usr/local/bin/rayls node --datadir /home/nonroot/data --metrics 127.0.0.1:9101 --log.stdout.format log-fmt --full --storage.v2 --txpool.pending-max-count 50000 --txpool.pending-max-size 62144000 --txpool.basefee-max-count 50000 --txpool.basefee-max-size 1048556000 --txpool.queued-max-count 50000 --txpool.queued-max-size 1048556000 --txpool.max-pending-txns 50000 --txpool.max-new-txns 50000 --txpool.minimal-protocol-fee 0 --txpool.gas-limit 999999999999 --txpool.max-tx-gas 999999999999 --txpool.max-tx-input-bytes 999999999999 --txpool.max-account-slots 50000 --gpo.default-suggested-fee 0 --http --http.addr 0.0.0.0 --http.api all
+    ports:
+      - 7542:8545
+    volumes:
+      - validator4-data:/home/nonroot/data
+    networks:
+      validators:
+        ipv4_address: 10.10.0.24
+
+volumes:
+  validator1-data:
+  validator2-data:
+  validator3-data:
+  validator4-data:
+  sharedgenesisdir:
+
+
+networks:
+  validators:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.0.0/16

@@ -1,0 +1,106 @@
+name: Nightly Fuzz
+
+# Runs the cargo-fuzz harnesses for Axyl protocol types. Each target runs for a
+# bounded wall-clock budget (libFuzzer -max_total_time). On a crash, the failing
+# input is uploaded as an artifact for local reproduction:
+#   cd crates/testing/fuzz-targets && cargo +nightly fuzz run <target> <artifact>
+#
+# Not part of PR checks: fuzzing is time-boxed exploration, not a pass/fail gate.
+
+# This workflow only reads the repo (checkout + build + fuzz); crash inputs are
+# uploaded via the artifacts API, which needs no extra scopes. Pin
+# least-privilege so the GITHUB_TOKEN can't be misused.
+permissions:
+  contents: read
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 04:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which fuzz target to run'
+        type: choice
+        required: false
+        default: 'all'
+        options:
+          - all
+          - batch_digest
+          - bcs_roundtrip
+          - certificate_signed_by
+          - difficulty_field_encoding
+          - header_digest_integrity
+          - header_nonce_roundtrip
+          - quorum_threshold
+      max_total_time:
+        description: 'Seconds to run each target'
+        type: string
+        required: false
+        default: '120'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Scheduled runs use a longer budget than the manual default.
+  FUZZ_SECONDS: ${{ github.event.inputs.max_total_time || '300' }}
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest-m
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - batch_digest
+          - bcs_roundtrip
+          - certificate_signed_by
+          - difficulty_field_encoding
+          - header_digest_integrity
+          - header_nonce_roundtrip
+          - quorum_threshold
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: nightly
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: nightly-fuzz
+          workspaces: crates/testing/fuzz-targets/fuzz
+          cache-on-failure: true
+
+      # Run every target on schedule / when "all" is chosen; otherwise just the picked one.
+      # `matrix` is only available in step-level `if:`, not at job level.
+      - name: Install cargo-fuzz
+        if: >-
+          github.event_name == 'schedule' ||
+          github.event.inputs.target == 'all' ||
+          github.event.inputs.target == matrix.target
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz ${{ matrix.target }}
+        if: >-
+          github.event_name == 'schedule' ||
+          github.event.inputs.target == 'all' ||
+          github.event.inputs.target == matrix.target
+        working-directory: crates/testing/fuzz-targets
+        run: |
+          cargo +nightly fuzz run ${{ matrix.target }} -- \
+            -max_total_time=${{ env.FUZZ_SECONDS }} -print_final_stats=1
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: crates/testing/fuzz-targets/fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

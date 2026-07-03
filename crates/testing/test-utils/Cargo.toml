@@ -1,0 +1,24 @@
+[package]
+name = "rayls-testing-test-utils"
+version.workspace = true
+edition = "2021"
+license = "BUSL-1.1"
+authors = [
+]
+publish = false
+
+[dependencies]
+tempfile = { workspace = true }
+eyre = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+indexmap = { workspace = true }
+rayls-middleware-orchestrator = { workspace = true }
+rayls-execution-evm = { workspace = true, features = ["test-utils"] }
+rayls-infrastructure-types = { workspace = true }
+rayls-execution-faucet = { workspace = true }
+rayls-infrastructure-config = { workspace = true }
+rayls-testing-test-utils-committee = { workspace = true }
+rayls-network-cli = { workspace = true }
+
+[lints]
+workspace = true

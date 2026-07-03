@@ -1,0 +1,34 @@
+[package]
+name = "chaos-framework"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "BUSL-1.1"
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Chaos engineering and fault injection framework for Axyl e2e testing."
+exclude.workspace = true
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+eyre = { workspace = true }
+tracing = { workspace = true }
+jsonrpsee = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "time", "rt-multi-thread"] }
+serde_json = { workspace = true }
+rand = { workspace = true }
+tempfile = { workspace = true }
+escargot = { workspace = true }
+nix = { version = "0.29", features = ["signal"] }
+secp256k1 = { workspace = true, features = ["global-context", "rand", "recovery"] }
+ethereum-tx-sign = { workspace = true }
+const-hex = { workspace = true }
+
+# workspace crates
+rayls-network-cli = { workspace = true }
+rayls-infrastructure-config = { workspace = true, features = ["test-utils"] }
+rayls-infrastructure-types = { workspace = true, features = ["test-utils"] }
+
+[lints]
+workspace = true

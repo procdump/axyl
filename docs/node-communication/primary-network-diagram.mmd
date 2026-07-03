@@ -1,0 +1,41 @@
+graph LR
+    subgraph NA["Node A"]
+        direction TB
+        P1["Vote"]
+        P2["MissingCertificates"]
+        P3["ConsensusHeader"]
+        P4["EpochRecord"]
+        P5["PeerExchange"]
+
+        G1["Certificate"]
+        G2["Consensus"]
+        G3["EpochVote"]
+    end
+
+    subgraph NB["Node B"]
+        direction TB
+        Q1["Sign and respond back.<br/>Requires direct connection.<br/>Does not broadcast."]
+        Q2["Read DB and return certs.<br/>Requires direct connection.<br/>Does not broadcast."]
+        Q3["Read DB and return header.<br/>Requires direct connection.<br/>Does not broadcast."]
+        Q4["Read DB and return record.<br/>Requires direct connection.<br/>Does not broadcast."]
+        Q5["Intercepted by network layer.<br/>Handled internally.<br/>Requires direct connection.<br/>Does not broadcast."]
+
+        R1["Validate and process via<br/>StateSynchronizer.<br/>No direct connection.<br/>Auto-broadcast by GossipSub."]
+        R2["Verify sig, aggregate per digest,<br/>record at f+1 quorum.<br/>No direct connection.<br/>Auto-broadcast by GossipSub."]
+        R3["Forward to EpochRecordCollector.<br/>No direct connection.<br/>Auto-broadcast by GossipSub."]
+    end
+
+    %% P2P Request-Response
+    P1 -->|" "| Q1
+    P2 -->|" "| Q2
+    P3 -->|" "| Q3
+    P4 -->|" "| Q4
+    P5 -->|" "| Q5
+
+    %% Gossip
+    G1 -.->|"rayls_certificates"| R1
+    G2 -.->|"rayls_consensus_headers"| R2
+    G3 -.->|"rayls_epoch_votes"| R3
+
+    NOTE["P2P messages require direct connections between nodes.<br/>All validators must maintain direct connections to each other.<br/>Observers need at least one direct connection to a validator."]
+    style NOTE fill:#fff3e0,stroke:#e65100,stroke-width:2px

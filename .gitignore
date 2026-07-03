@@ -1,0 +1,50 @@
+# cargo
+debug/
+target/
+
+# MacOS
+.DS_Store
+
+# vscode
+.vscode/launch.json
+.vscode/settings.json
+.vscode/tasks.json
+
+# prometheus
+data/
+
+# intellij-based IDEs
+.idea
+
+.env
+
+# etc
+local-validators
+etc/**/dist
+etc/tps/cache
+topology.json
+topology.*.json
+etc/manage/config/accounts.yaml
+etc/manage/config/rls-accounts.yaml
+etc/test-network/accounts.yaml
+etc/test-network/rls-accounts.yaml
+local-validator
+node_modules
+clk.env
+net.env
+
+# observer node datadir (see README "Run an observer against testnet")
+DATADIR/
+
+# specific account ONLY for unit tests
+gcloud-credentials.json
+
+# Ignore generated credentials from google-github-actions/auth
+gha-creds-*.json
+
+# agents
+.aider*
+.opencode*
+
+# profiling
+heaptrack

@@ -1,0 +1,36 @@
+{
+    "computers": [
+        {
+            "id": "node001",
+            "dataDirPath": "/var/lib/rayls",
+            "consensusIp": "",
+            "consensusPort": "49001",
+            "consensusRegion": "eu",
+            "rpcPort": "8545",
+            "metricsPort": "", // optional, if not set metrics will not be exposed
+            "sshIp": "",
+            "sshPort": "22",
+            "sshUser": "",
+            "sshKeyPath": "",
+            "sshPass": ""
+        }
+    ],
+    "validators": [
+        {
+            "computerId": "node001",
+            "walletAddress": "0x1111111111111111111111111111111111111111",
+            "blsPassphrase": "local" // optional, per-validator BLS keystore passphrase; defaults to "local" if omitted
+        }
+    ],
+    "observers": ["node001"],
+    "regions": ["eu"],
+    "config": {
+        "chainId": "0x1f7",
+        "epochDurationInSecs": "60",
+        "devFundedWalletAddress": "0x....",
+        "maxHeaderDelayMs": "1000",
+        "minHeaderDelayMs": "1000",
+        "consensusRegistryOwner": "0x....",
+        "networkAdmin": "0x...."
+    }
+}

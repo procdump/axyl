@@ -1,0 +1,66 @@
+[package]
+name = "rayls-middleware-orchestrator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "BUSL-1.1"
+homepage.workspace = true
+repository.workspace = true
+authors = [
+]
+
+[dependencies]
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true }
+tracing = { workspace = true }
+rayls-middleware-bridge = { workspace = true }
+rayls-middleware-rewards = { workspace = true }
+rayls-consensus-primary = { workspace = true }
+rayls-infrastructure-storage = { workspace = true }
+rayls-infrastructure-types = { workspace = true }
+rayls-infrastructure-config = { workspace = true }
+rayls-consensus-worker = { workspace = true }
+rayls-execution-rpc = { workspace = true }
+eyre = { workspace = true }
+futures = { workspace = true }
+rayls-consensus-network = { workspace = true }
+rayls-execution-evm = { workspace = true }
+consensus-metrics = { workspace = true }
+rayls-consensus-primary-metrics = { workspace = true }
+rayls-consensus-state-sync = { workspace = true }
+rayls-middleware-processor = { workspace = true }
+rayls-batch-builder = { workspace = true }
+rayls-batch-validator = { workspace = true }
+jsonrpsee = { workspace = true }
+roaring = { workspace = true }
+alloy = { workspace = true}
+rayon = { workspace = true }
+
+# TODO: temporary solution until reth supports public rpc hooks
+rayls-execution-faucet = { workspace = true }
+
+[features]
+default = []
+# Single-node / local dev consensus behavior (e.g. self-certifying the epoch close
+# without peers). Off by default; enabled transitively by the top-level `dev-single-node-setup`
+# feature. Forwards to the primary's `dev-single-node-setup` feature. NOT FOR PRODUCTION.
+dev-single-node-setup = [
+    "rayls-consensus-primary/dev-single-node-setup",
+    "rayls-consensus-worker/dev-single-node-setup",
+    "rayls-middleware-bridge/dev-single-node-setup",
+    "rayls-infrastructure-types/dev-single-node-setup",
+]
+
+[dev-dependencies]
+rand = { workspace = true }
+rayls-consensus-primary = { workspace = true, features = ["test-utils"] }
+rayls-infrastructure-types = { workspace = true, features = ["test-utils"] }
+rayls-middleware-processor = { workspace = true, features = ["test-utils"] }
+rayls-testing-test-utils = { workspace = true }
+rayls-infrastructure-network-types = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

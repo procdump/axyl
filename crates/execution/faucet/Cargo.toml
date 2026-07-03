@@ -1,0 +1,50 @@
+[package]
+name = "rayls-execution-faucet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "BUSL-1.1"
+homepage.workspace = true
+repository.workspace = true
+authors = [
+]
+
+[dependencies]
+tracing = { workspace = true }
+humantime = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+rayls-execution-evm = { workspace = true }
+rayls-execution-rpc = { workspace = true }
+reth = { workspace = true }
+reth-primitives = { workspace = true }
+reth-tasks = { workspace = true }
+reth-transaction-pool = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+eyre = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
+lru_time_cache = { version = "0.11.11" }
+jsonrpsee = { workspace = true, features = ["macros"] }
+# still needed for jsonrpsee 0.24.3
+async-trait = { workspace = true }
+
+# google cloud feature
+gcloud-sdk = { version = "=0.24.6", default-features = false, features = [
+    "google-cloud-kms-v1",
+    "tls-webpki-roots",
+] }
+k256 = "0.13.3"
+ecdsa = { version = "0.16.9", features = ["pem"] }
+secp256k1 = { workspace = true }
+rayls-infrastructure-types = { workspace = true }
+
+[dev-dependencies]
+consensus-metrics = { workspace = true }
+rayls-testing-test-utils = { workspace = true }
+rayls-infrastructure-network-types = { workspace = true }
+rayls-consensus-worker = { workspace = true }
+rayls-infrastructure-storage = { workspace = true }
+tempfile = { workspace = true }
+rayls-infrastructure-config = { workspace = true }
+rayls-execution-evm = { workspace = true, features = ["test-utils"] }
+rayls-infrastructure-types = { workspace = true, features = ["test-utils"] }
