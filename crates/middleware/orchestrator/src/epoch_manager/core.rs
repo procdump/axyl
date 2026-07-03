@@ -1157,11 +1157,13 @@ where
         Err(eyre::eyre!("consensus output channel closed before epoch boundary"))
     }
 
-    /// Wait for the engine to execute the epoch-closing block.
+    /// Wait for the engine to execute the epoch-closing boundary output.
     ///
-    /// This sends the boundary output to the engine and waits for the execution
-    /// result identified by `target_hash` in the block's `parent_beacon_block_root`.
-    /// Consensus shutdown must already be complete before calling this.
+    /// Sends the boundary output to the engine, then subscribes to the `executed_anchor` watch and
+    /// waits until `anchor.number >= boundary_output.number` — a monotonic, drop-free completion
+    /// signal, immune to which block ends up the canonical tip (e.g. a drained parked batch, whose
+    /// block anchors to a previous output). `target_hash` is used only for diagnostics, not
+    /// matching. Consensus shutdown must already be complete before calling this.
     pub(super) async fn await_epoch_execution(
         &self,
         engine: &ExecutionNode,
