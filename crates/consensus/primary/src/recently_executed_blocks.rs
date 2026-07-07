@@ -57,14 +57,18 @@ impl fmt::Display for SubDagLeaderRound {
 /// hazard as [`SubDagLeaderRound`]: a block drained from an OLD parked output lands as the tip yet
 /// commits to that old output's consensus header, so comparing this digest against the *frontier*
 /// consensus tip (`some_digest == frontier_digest`) would falsely conclude "the tip is caught up".
-/// The type stops that compile-time; use [`get`](Self::get) only to feed a genuine lookup (e.g.
-/// `get_consensus_by_hash`), never an equality check against a frontier digest.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// It intentionally does NOT derive `PartialEq`/`Eq`: a frontier digest is a bare `B256`, so that
+/// comparison already fails to compile, and there is no legitimate reason to equality-check two of
+/// these against each other either. Use [`get`](Self::get) only to feed a genuine lookup (e.g.
+/// `get_consensus_by_hash`); if you find yourself unwrapping to compare, that is the bug this type
+/// exists to surface.
+#[derive(Copy, Clone, Debug)]
 pub struct SubDagConsensusDigest(B256);
 
 impl SubDagConsensusDigest {
-    /// The raw digest. Prefer keeping the newtype; unwrap only to look the header up, not to
-    /// compare against a frontier digest.
+    /// The raw digest. Unwrap only to look the header up, never to compare against a frontier
+    /// digest.
     pub fn get(self) -> B256 {
         self.0
     }
@@ -233,6 +237,11 @@ impl RecentlyExecutedBlocks {
     /// [`subdag_leader_epoch`](RecentlyExecutedBlock::subdag_leader_epoch) /
     /// [`subdag_leader_round`](RecentlyExecutedBlock::subdag_leader_round) precisely so this trap
     /// is named at the callsite rather than silently reachable via `.epoch()` / `.round()`.
+    ///
+    /// On an empty window this returns a `RecentlyExecutedBlock` wrapping a default `SealedHeader`
+    /// (number 0, zero hash, nonce 0) rather than `None` — same convention as
+    /// [`latest_block_num_hash`](Self::latest_block_num_hash). Call [`is_empty`](Self::is_empty)
+    /// first if a synthetic zero block would be mistaken for real execution history.
     pub fn latest_block(&self) -> RecentlyExecutedBlock {
         RecentlyExecutedBlock(self.blocks.back().cloned().unwrap_or_else(Default::default))
     }
@@ -260,5 +269,55 @@ impl RecentlyExecutedBlocks {
     /// Do we have any blocks?
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rayls_infrastructure_types::{nonce::pack_nonce, ExecHeader};
+
+    fn header_with_nonce(number: u64, epoch: u32, round: u32) -> SealedHeader {
+        let header =
+            ExecHeader { number, nonce: pack_nonce(epoch, round).into(), ..Default::default() };
+        SealedHeader::seal_slow(header)
+    }
+
+    /// The full chain the prod bug lived on: push a block whose nonce encodes a specific
+    /// (epoch, round), then read it back off the tip via the guarded accessors.
+    #[test]
+    fn subdag_leader_fields_decoded_from_tip_nonce() {
+        let mut blocks = RecentlyExecutedBlocks::new(10);
+        blocks.push_latest(header_with_nonce(42, 7, 498));
+
+        let tip = blocks.latest_block();
+        assert_eq!(tip.subdag_leader_epoch().get(), 7);
+        assert_eq!(tip.subdag_leader_round().get(), 498);
+        assert_eq!(tip.number(), 42);
+    }
+
+    /// The tip's leader round is NOT the frontier: a later-arriving block from an OLDER output
+    /// (lower nonce round) becomes the tip by height and regresses the round read off it.
+    #[test]
+    fn drained_old_batch_regresses_tip_leader_round() {
+        let mut blocks = RecentlyExecutedBlocks::new(10);
+        blocks.push_latest(header_with_nonce(100, 3, 498)); // frontier round 498
+        blocks.push_latest(header_with_nonce(101, 3, 200)); // drained parked batch, round 200
+
+        let tip = blocks.latest_block();
+        assert_eq!(tip.number(), 101, "tip is the newest height");
+        assert_eq!(tip.subdag_leader_round().get(), 200, "…but its leader round regressed");
+    }
+
+    /// `block_at_number` yields the guarded wrapper for the same reason.
+    #[test]
+    fn block_at_number_exposes_guarded_accessors() {
+        let mut blocks = RecentlyExecutedBlocks::new(10);
+        blocks.push_latest(header_with_nonce(7, 2, 9));
+
+        let found = blocks.block_at_number(7).expect("block present");
+        assert_eq!(found.subdag_leader_epoch().get(), 2);
+        assert_eq!(found.subdag_leader_round().get(), 9);
+        assert!(blocks.block_at_number(999).is_none());
     }
 }
