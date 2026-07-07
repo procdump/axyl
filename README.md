@@ -1,5 +1,7 @@
 # Rayls Network
 
+[![License: BUSL-1.1](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)](./LICENSE)
+
 Consensus layer (CL) is an implementation of Narwhal and Bullshark.
 Execution layer (EL) produces EVM blocks compatible with Ethereum.
 
@@ -132,6 +134,12 @@ curl 127.0.0.1:8545 \
     --data '{"method":"eth_chainId","params":[],"id":1,"jsonrpc":"2.0"}'
 ```
 
+## Security Audits
+
+The protocol has been independently audited by [Halborn](https://www.halborn.com/) —
+three assessments covering the consensus protocol, the network node, and the smart
+contracts. The full reports and their outcomes are in the [audits/](./audits/) directory.
+
 ## Acknowledgements
 
 Rayls Network is an EVM-compatible blockchain built with DAG-based consensus.
@@ -147,4 +155,4 @@ We want to extend our sincere appreciation to the following teams:
 
 Rayls Network is licensed under the **Business Source License 1.1 (BUSL-1.1)** — see [LICENSE](./LICENSE). The Change Date is four years after each version's first public release, with the **Apache License, Version 2.0** as the Change License.
 
-This repository is a derivative work that incorporates and modifies code from Telcoin Network, Sui, and reth (all permissively licensed), plus the LayerZero OFT interfaces kept under their original MIT license. See [NOTICE](./NOTICE) for full attribution — including the MIT terms for the LayerZero interfaces — alongside [LICENSE-APACHE](./LICENSE-APACHE).
+This repository is a derivative work that incorporates and modifies code from Telcoin Network, Sui, and reth (all permissively licensed), plus the LayerZero OFT interfaces kept under their original MIT license. See [NOTICE](./NOTICE) for full attribution — including the MIT terms for the LayerZero interfaces — alongside the third-party [Apache 2.0 license text](./licenses/Apache-2.0.txt).

@@ -6,6 +6,17 @@ on:
     branches:
       - main
 
+# Least privilege by default; the jobs that post PR comments re-grant
+# pull-requests: write in their own permissions block.
+permissions:
+  contents: read
+
+# Supersede in-flight runs when a PR is pushed/rebased instead of stacking
+# full build+test runs (the "require up-to-date branch" rule causes churn).
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_INCREMENTAL: 0 # disable incremental compilation
   RUSTFLAGS: ""
@@ -52,7 +63,7 @@ jobs:
   # ===========================================================================
   tests:
     name: Tests
-    runs-on: ubuntu-latest-m
+    runs-on: ubuntu-latest
     steps:
       # exit immediately for drafts
       # - name: Check if draft PR
@@ -92,7 +103,7 @@ jobs:
   # ===========================================================================
   security-scan:
     name: Security Scan
-    runs-on: ubuntu-latest-m
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
@@ -120,14 +131,18 @@ jobs:
         run: |
           if [ -f trivy-results.txt ]; then
             echo "results<<EOF" >> $GITHUB_OUTPUT
-            cat trivy-results.txt >> $GITHUB_OUTPUT
+            # cap output so the sticky comment stays under GitHub's 65536-char limit
+            tail -c 60000 trivy-results.txt >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
           else
             echo "results=No scan results available" >> $GITHUB_OUTPUT
           fi
 
       - name: Post Trivy results to PR
-        if: always()
+        # Sticky comments need a writable token, which fork PRs don't get
+        # (read-only GITHUB_TOKEN). Skip on forks — results stay in the job log
+        # and the "Fail if vulnerabilities found" gate below still enforces.
+        if: always() && github.event.pull_request.head.repo.full_name == github.repository
         uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
         with:
           header: trivy-code
@@ -228,7 +243,9 @@ jobs:
           fi
 
       - name: Post contracts test results to PR
-        if: steps.changes.outputs.contracts == 'true'
+        # Skip on forks — fork PRs get a read-only token and can't post
+        # comments; the "Fail if contract tests failed" gate below still runs.
+        if: steps.changes.outputs.contracts == 'true' && github.event.pull_request.head.repo.full_name == github.repository
         uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
         with:
           header: contracts-tests
