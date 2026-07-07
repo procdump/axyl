@@ -512,12 +512,8 @@ impl RethEnv {
             );
         }
 
-        let to_fix: Vec<Address> = genesis
-            .alloc
-            .keys()
-            .filter(|addr| !already_fixed.contains(*addr))
-            .copied()
-            .collect();
+        let to_fix: Vec<Address> =
+            genesis.alloc.keys().filter(|addr| !already_fixed.contains(*addr)).copied().collect();
 
         if to_fix.is_empty() {
             info!(target: "rayls::reth", block, "genesis account history already fully seeded; nothing to do");
