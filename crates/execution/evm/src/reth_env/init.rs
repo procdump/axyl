@@ -473,7 +473,7 @@ impl RethEnv {
     /// Seed the genesis account history for accounts that produce no changesets
     /// `IndexAccountHistoryStage` clears `AccountsHistory` on its first
     /// run and rebuilds from `AccountChangeSets`.
-    /// 
+    ///
     /// This fix re-inserts a genesis block 0 entry for every such account via a
     /// read-merge-write so existing post-genesis modification shards are
     /// preserved. Only applicable to v2 (RocksDB) archives. Idempotent.
