@@ -470,18 +470,18 @@ impl RethEnv {
         Ok(())
     }
 
-    /// Seed the genesis account history for accounts that produce no changesets.
+    /// Seed the genesis account history for accounts that produce no changesets
     /// `IndexAccountHistoryStage` clears `AccountsHistory` on its first
     /// run and rebuilds from `AccountChangeSets`.
-    ///
-    /// This fix re-inserts a genesis block 0 entry without history via a
+    /// 
+    /// This fix re-inserts a genesis block 0 entry for every such account via a
     /// read-merge-write so existing post-genesis modification shards are
     /// preserved. Only applicable to v2 (RocksDB) archives. Idempotent.
     #[cfg(feature = "archive-replay")]
     pub fn fix_genesis_account_history(&self) -> eyre::Result<()> {
         use reth_db::{models::ShardedKey, BlockNumberList};
         use reth_provider::RocksDBProviderFactory;
-        use std::collections::HashSet;
+        use std::collections::{HashMap, HashSet};
 
         if !self.node_config.storage_settings().use_hashed_state() {
             info!(target: "rayls::reth", "v1 (plain) storage; account history needs no fix");
@@ -492,16 +492,20 @@ impl RethEnv {
         let genesis = chain_spec.genesis();
         let block = chain_spec.genesis_header().number;
 
-        let already_fixed: HashSet<Address> = {
+        // Single pass: collect which addresses already have a block-0 entry
+        // (idempotency guard) and how many shards each address has (safety guard).
+        let (already_fixed, shard_counts): (HashSet<Address>, HashMap<Address, usize>) = {
             let rocksdb = self.provider_factory.rocksdb_provider();
-            let mut set = HashSet::new();
+            let mut fixed = HashSet::new();
+            let mut counts: HashMap<Address, usize> = HashMap::new();
             for entry in rocksdb.iter::<reth_db::tables::AccountsHistory>()? {
                 let (key, value) = entry?;
+                *counts.entry(key.key).or_insert(0) += 1;
                 if value.contains(block) {
-                    set.insert(key.key);
+                    fixed.insert(key.key);
                 }
             }
-            set
+            (fixed, counts)
         };
 
         if !already_fixed.is_empty() {
@@ -512,8 +516,30 @@ impl RethEnv {
             );
         }
 
-        let to_fix: Vec<Address> =
-            genesis.alloc.keys().filter(|addr| !already_fixed.contains(*addr)).copied().collect();
+        // Accounts with more than one shard have post-genesis changesets that were
+        // correctly indexed by IndexAccountHistoryStage.
+        let multi_shard_skipped = genesis
+            .alloc
+            .keys()
+            .filter(|addr| shard_counts.get(*addr).copied().unwrap_or(0) > 1)
+            .count();
+
+        if multi_shard_skipped > 0 {
+            info!(
+                target: "rayls::reth",
+                multi_shard_skipped,
+                "skipping genesis accounts with multiple history shards (post-genesis changesets present)"
+            );
+        }
+
+        let to_fix: Vec<Address> = genesis
+            .alloc
+            .keys()
+            .filter(|addr| {
+                !already_fixed.contains(*addr) && shard_counts.get(*addr).copied().unwrap_or(0) <= 1
+            })
+            .copied()
+            .collect();
 
         if to_fix.is_empty() {
             info!(target: "rayls::reth", block, "genesis account history already fully seeded; nothing to do");
