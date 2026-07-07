@@ -80,6 +80,21 @@ struct Cli {
     #[arg(long, value_name = "BLOCK")]
     unwind_to: Option<u64>,
 
+    /// Fix genesis history indices, then exit (no replay). Idempotent; run
+    /// with the node stopped. Fixes two v2 archive issues in one pass:
+    ///
+    /// 1. StoragesHistory re-key: reth writes genesis StoragesHistory under
+    ///    plain slots while the v2 read looks up by keccak256(slot), so
+    ///    genesis-seeded storage (e.g. the validator set) returns 0x0 at
+    ///    historical blocks.
+    ///
+    /// 2. AccountsHistory seed: IndexAccountHistoryStage clears AccountsHistory
+    ///    on first sync and never re-inserts accounts whose code/nonce/balance
+    ///    never change after genesis (immutable system contracts). Historical
+    ///    `eth_call` returns empty contract code for those accounts.
+    #[arg(long)]
+    fix_genesis_history: bool,
+
     /// Verify state root after every block (slow). Default: epoch boundaries only.
     #[arg(long)]
     verify_every_block: bool,
@@ -173,6 +188,18 @@ async fn run(cli: Cli) -> eyre::Result<()> {
     )
     .await
     .wrap_err("open archive reth env")?;
+
+    // maintenance exit: fix genesis history (storage re-key + account history seed)
+    if cli.fix_genesis_history {
+        archive_evm.fix_genesis_history()?;
+        archive_evm.fix_genesis_account_history()?;
+        info!(
+            target: "rayls_replay::main",
+            archive_out = %cli.archive_out.display(),
+            "genesis-history fix complete"
+        );
+        return Ok(());
+    }
 
     // unwind exits before opening the snapshot env; only the archive is touched
     if let Some(target) = cli.unwind_to {

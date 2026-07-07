@@ -469,4 +469,168 @@ impl RethEnv {
         info!(target: "rayls::reth", target_block, "unwind complete");
         Ok(())
     }
+
+    /// Seed the genesis account history for accounts that produce no changesets.
+    /// `IndexAccountHistoryStage` clears `AccountsHistory` on its first
+    /// run and rebuilds from `AccountChangeSets`.
+    ///
+    /// This fix re-inserts a genesis block 0 entry without history via a
+    /// read-merge-write so existing post-genesis modification shards are
+    /// preserved. Only applicable to v2 (RocksDB) archives. Idempotent.
+    #[cfg(feature = "archive-replay")]
+    pub fn fix_genesis_account_history(&self) -> eyre::Result<()> {
+        use reth_db::{models::ShardedKey, BlockNumberList};
+        use reth_provider::RocksDBProviderFactory;
+        use std::collections::HashSet;
+
+        if !self.node_config.storage_settings().use_hashed_state() {
+            info!(target: "rayls::reth", "v1 (plain) storage; account history needs no fix");
+            return Ok(());
+        }
+
+        let chain_spec = self.provider_factory.chain_spec();
+        let genesis = chain_spec.genesis();
+        let block = chain_spec.genesis_header().number;
+
+        let already_fixed: HashSet<Address> = {
+            let rocksdb = self.provider_factory.rocksdb_provider();
+            let mut set = HashSet::new();
+            for entry in rocksdb.iter::<reth_db::tables::AccountsHistory>()? {
+                let (key, value) = entry?;
+                if value.contains(block) {
+                    set.insert(key.key);
+                }
+            }
+            set
+        };
+
+        if !already_fixed.is_empty() {
+            info!(
+                target: "rayls::reth",
+                already_fixed = already_fixed.len(),
+                "idempotency: skipping accounts already present in AccountsHistory at genesis block"
+            );
+        }
+
+        let to_fix: Vec<Address> = genesis
+            .alloc
+            .keys()
+            .filter(|addr| !already_fixed.contains(*addr))
+            .copied()
+            .collect();
+
+        if to_fix.is_empty() {
+            info!(target: "rayls::reth", block, "genesis account history already fully seeded; nothing to do");
+            return Ok(());
+        }
+
+        let rocksdb = self.provider_factory.rocksdb_provider();
+        let mut batch = rocksdb.batch();
+        for addr in &to_fix {
+            let key = ShardedKey::last(*addr);
+            let existing = rocksdb.get::<reth_db::tables::AccountsHistory>(key.clone())?;
+            let merged = match existing {
+                Some(existing_list) => {
+                    let blocks: Vec<u64> =
+                        core::iter::once(block).chain(existing_list.iter()).collect();
+                    BlockNumberList::new(blocks)
+                        .map_err(|e| eyre::eyre!("failed to build block number list: {e}"))?
+                }
+                None => BlockNumberList::new([block]).expect("single block always fits"),
+            };
+            batch.put::<reth_db::tables::AccountsHistory>(key, &merged)?;
+        }
+        batch.commit()?;
+
+        info!(
+            target: "rayls::reth",
+            accounts = to_fix.len(),
+            block,
+            "seeded genesis account history for v2 archive"
+        );
+        Ok(())
+    }
+
+    /// Re-key the genesis storage history to hashed keys so v2 archive reads
+    /// reconstruct genesis-seeded storage instead of returning 0x0.
+    ///
+    /// reth's genesis writer keys `StoragesHistory` by the plain slot, but the
+    /// v2 read looks it up by `keccak256(slot)`, so genesis-seeded storage
+    /// (e.g. the static validator set) reads as `NotYetWritten` -> 0x0. This
+    /// re-emits the genesis storage history under the hashed slot via reth's
+    /// public `insert_storage_history`. Idempotent; a no-op in v1 (plain) mode.
+    #[cfg(feature = "archive-replay")]
+    pub fn fix_genesis_history(&self) -> eyre::Result<()> {
+        use alloy::{genesis::GenesisAccount, primitives::keccak256};
+        use reth_db_common::init::insert_storage_history;
+        use reth_provider::DBProvider;
+        use std::collections::HashSet;
+
+        if !self.node_config.storage_settings().use_hashed_state() {
+            info!(target: "rayls::reth", "v1 (plain) storage; genesis history needs no re-key");
+            return Ok(());
+        }
+
+        let chain_spec = self.provider_factory.chain_spec();
+        let genesis = chain_spec.genesis();
+        let block = chain_spec.genesis_header().number;
+
+        // mirror reth's genesis alloc but with hashed storage keys; the address
+        // stays plain (StoragesHistory keys the address plain, slot hashed).
+        let mut rehashed: Vec<(Address, GenesisAccount)> = genesis
+            .alloc
+            .iter()
+            .filter_map(|(addr, account)| {
+                account.storage.as_ref().map(|storage| {
+                    let hashed =
+                        storage.iter().map(|(slot, value)| (keccak256(slot), *value)).collect();
+                    (*addr, GenesisAccount { storage: Some(hashed), ..account.clone() })
+                })
+            })
+            .collect();
+
+        // Idempotency guard: scan StoragesHistory for (addr, hashed_slot) pairs
+        // already containing `block`. Scoping the rocksdb reference ensures it's
+        // dropped before the write transaction is opened below.
+        let already_fixed: HashSet<(Address, B256)> = {
+            let rocksdb = self.provider_factory.rocksdb_provider();
+            let mut set = HashSet::new();
+            for entry in rocksdb.iter::<reth_db::tables::StoragesHistory>()? {
+                let (key, value) = entry?;
+                if value.contains(block) {
+                    set.insert((key.address, key.sharded_key.key));
+                }
+            }
+            set
+        };
+
+        if !already_fixed.is_empty() {
+            info!(
+                target: "rayls::reth",
+                already_fixed = already_fixed.len(),
+                "idempotency: skipping slots already present in StoragesHistory at genesis block"
+            );
+            for (addr, account) in &mut rehashed {
+                if let Some(storage) = account.storage.as_mut() {
+                    storage.retain(|slot, _| !already_fixed.contains(&(*addr, *slot)));
+                }
+            }
+            rehashed
+                .retain(|(_, account)| account.storage.as_ref().map_or(false, |s| !s.is_empty()));
+        }
+
+        let slots: usize =
+            rehashed.iter().map(|(_, a)| a.storage.as_ref().map_or(0, |s| s.len())).sum();
+
+        if slots == 0 {
+            info!(target: "rayls::reth", block, "genesis storage history already fully re-keyed; nothing to do");
+            return Ok(());
+        }
+
+        let provider_rw = self.provider_factory.database_provider_rw()?;
+        insert_storage_history(&provider_rw, rehashed.iter().map(|(a, acc)| (a, acc)), block)?;
+        provider_rw.commit()?;
+        info!(target: "rayls::reth", slots, block, "re-keyed genesis storage history to hashed keys");
+        Ok(())
+    }
 }
