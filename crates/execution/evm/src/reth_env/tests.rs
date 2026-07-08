@@ -884,3 +884,145 @@ fn test_rpc_validator() {
         }
     };
 }
+
+/// Full-DB check for `fix_genesis_history`: build a v2 storage stack, run
+/// canonical genesis init (which writes genesis storage history under the
+/// buggy plain slot), simulate the post-genesis history a replay would append
+/// under the hashed slot, then re-key and assert every case is correct.
+#[cfg(feature = "archive-replay")]
+#[tokio::test]
+async fn test_fix_genesis_history_rekeys_and_preserves_post_genesis() -> eyre::Result<()> {
+    use crate::{reth_env::RethEnv, traits::RaylsNode};
+    use alloy::primitives::keccak256;
+    use reth_db::{models::storage_sharded_key::StorageShardedKey, tables, BlockNumberList};
+    use reth_db_common::init::init_genesis_with_settings;
+    use reth_provider::{
+        providers::{RocksDBBuilder, StaticFileProvider},
+        ChainSpecProvider, ProviderFactory, RocksDBProviderFactory, StorageSettings,
+        StorageSettingsCache,
+    };
+    use std::collections::BTreeMap;
+
+    // genesis with one account holding three storage slots.
+    let addr = Address::from([0x11u8; 20]);
+    let slot_a = B256::from(U256::from(1u64)); // immutable: no post-genesis history
+    let slot_b = B256::from(U256::from(2u64)); // single-shard mutable
+    let slot_c = B256::from(U256::from(3u64)); // multi-shard mutable
+    let storage = BTreeMap::from([
+        (slot_a, B256::from(U256::from(0xAAu64))),
+        (slot_b, B256::from(U256::from(0xBBu64))),
+        (slot_c, B256::from(U256::from(0xCCu64))),
+    ]);
+    let genesis = rayls_infrastructure_types::test_genesis().extend_accounts([(
+        addr,
+        GenesisAccount {
+            balance: U256::from(1_000u64),
+            storage: Some(storage),
+            ..Default::default()
+        },
+    )]);
+
+    // v2 storage stack + canonical genesis init (writes plain-key history).
+    let tmp_dir = TempDir::new()?;
+    let datadir = tmp_dir.path().to_path_buf();
+    let db = Arc::new(reth_db::init_db(
+        datadir.join("db"),
+        reth_db::mdbx::DatabaseArguments::default(),
+    )?);
+    let rayls_chain_spec = Arc::new(
+        crate::chainspec::RaylsChainSpec::builder(Arc::new(RethChainSpec::from(genesis))).build(),
+    );
+    let rocksdb_provider =
+        RocksDBBuilder::new(datadir.join("rocksdb")).with_default_tables().build()?;
+    let static_files = StaticFileProvider::read_write(datadir.join("static_files"))?;
+    let runtime = reth_tasks::Runtime::with_existing_handle(tokio::runtime::Handle::current())?;
+    let provider_factory: ProviderFactory<RaylsNode> =
+        ProviderFactory::new(db, rayls_chain_spec, static_files, rocksdb_provider, runtime)?;
+    let settings = StorageSettings::v2();
+    provider_factory.set_storage_settings_cache(settings);
+    init_genesis_with_settings(&provider_factory, settings)?;
+    let _ = provider_factory.chain_spec();
+
+    let (ha, hb, hc) = (keccak256(slot_a), keccak256(slot_b), keccak256(slot_c));
+
+    // Precondition (the bug): genesis history is keyed by the PLAIN slot, so the
+    // hashed keys the v2 read consults carry no genesis entry yet.
+    {
+        let rocksdb = provider_factory.rocksdb_provider();
+        for h in [ha, hb, hc] {
+            let shards = rocksdb.storage_history_shards(addr, h)?;
+            assert!(
+                shards.iter().all(|(_, l)| !l.contains(0u64)),
+                "hashed slot must lack the genesis entry before the fix"
+            );
+        }
+        assert!(
+            rocksdb.storage_history_shards(addr, slot_a)?.iter().any(|(_, l)| l.contains(0u64)),
+            "genesis writer put the entry under the plain slot (the bug)"
+        );
+    }
+
+    // Simulate post-genesis history under the HASHED keys, as replay's indexer
+    // would append: slot_b one open shard [5]; slot_c sealed [100,400] + open [900].
+    {
+        let rocksdb = provider_factory.rocksdb_provider();
+        let mut batch = rocksdb.batch();
+        batch.put::<tables::StoragesHistory>(
+            StorageShardedKey::last(addr, hb),
+            &BlockNumberList::new([5u64]).unwrap(),
+        )?;
+        batch.put::<tables::StoragesHistory>(
+            StorageShardedKey::new(addr, hc, 400),
+            &BlockNumberList::new([100u64, 400]).unwrap(),
+        )?;
+        batch.put::<tables::StoragesHistory>(
+            StorageShardedKey::last(addr, hc),
+            &BlockNumberList::new([900u64]).unwrap(),
+        )?;
+        batch.commit()?;
+    }
+
+    // Run the fix.
+    let fixed = RethEnv::fix_genesis_history_with(&provider_factory, true)?;
+    assert!(fixed >= 3, "expected at least our three slots re-keyed, got {fixed}");
+
+    let rocksdb = provider_factory.rocksdb_provider();
+    let blocks = |shards: &[(StorageShardedKey, BlockNumberList)]| -> Vec<u64> {
+        shards.iter().flat_map(|(_, l)| l.iter()).collect()
+    };
+
+    // slot_a (immutable) -> a fresh open shard [0].
+    assert_eq!(
+        blocks(&rocksdb.storage_history_shards(addr, ha)?),
+        vec![0],
+        "immutable genesis slot seeded with block 0"
+    );
+
+    // slot_b (single-shard mutable) -> [0, 5]: genesis added, post-genesis kept.
+    assert_eq!(
+        blocks(&rocksdb.storage_history_shards(addr, hb)?),
+        vec![0, 5],
+        "block 5 must survive (no clobber)"
+    );
+
+    // slot_c (multi-shard) -> earliest shard gets 0 prepended; open shard untouched.
+    let c = rocksdb.storage_history_shards(addr, hc)?; // ascending by highest block
+    assert_eq!(
+        c[0].1.iter().collect::<Vec<u64>>(),
+        vec![0, 100, 400],
+        "genesis prepended into the earliest shard"
+    );
+    assert_eq!(
+        c.last().unwrap().1.iter().collect::<Vec<u64>>(),
+        vec![900],
+        "the open shard's post-genesis history is preserved"
+    );
+
+    // Idempotency: a second run is a no-op.
+    let again = RethEnv::fix_genesis_history_with(&provider_factory, true)?;
+    assert_eq!(again, 0, "second run must re-key nothing");
+    assert_eq!(blocks(&rocksdb.storage_history_shards(addr, ha)?), vec![0]);
+    assert_eq!(blocks(&rocksdb.storage_history_shards(addr, hb)?), vec![0, 5]);
+
+    Ok(())
+}

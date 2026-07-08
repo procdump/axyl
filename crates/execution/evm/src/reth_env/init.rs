@@ -484,23 +484,37 @@ impl RethEnv {
     /// left untouched. Only applicable to v2 (RocksDB) archives. Idempotent.
     #[cfg(feature = "archive-replay")]
     pub fn fix_genesis_account_history(&self) -> eyre::Result<()> {
+        Self::fix_genesis_account_history_with(
+            &self.provider_factory,
+            self.node_config.storage_settings().use_hashed_state(),
+        )?;
+        Ok(())
+    }
+
+    /// Testable core of [`Self::fix_genesis_account_history`]. Returns the number
+    /// of accounts seeded.
+    #[cfg(feature = "archive-replay")]
+    pub(crate) fn fix_genesis_account_history_with(
+        provider_factory: &ProviderFactory<RaylsNode>,
+        use_hashed_state: bool,
+    ) -> eyre::Result<usize> {
         use reth_db::{models::ShardedKey, BlockNumberList};
         use reth_provider::RocksDBProviderFactory;
         use std::collections::{HashMap, HashSet};
 
-        if !self.node_config.storage_settings().use_hashed_state() {
+        if !use_hashed_state {
             info!(target: "rayls::reth", "v1 (plain) storage; account history needs no fix");
-            return Ok(());
+            return Ok(0);
         }
 
-        let chain_spec = self.provider_factory.chain_spec();
+        let chain_spec = provider_factory.chain_spec();
         let genesis = chain_spec.genesis();
         let block = chain_spec.genesis_header().number;
 
         // Single pass: collect which addresses already have a block-0 entry
         // (idempotency guard) and how many shards each address has (safety guard).
         let (already_fixed, shard_counts): (HashSet<Address>, HashMap<Address, usize>) = {
-            let rocksdb = self.provider_factory.rocksdb_provider();
+            let rocksdb = provider_factory.rocksdb_provider();
             let mut fixed = HashSet::new();
             let mut counts: HashMap<Address, usize> = HashMap::new();
             for entry in rocksdb.iter::<reth_db::tables::AccountsHistory>()? {
@@ -548,10 +562,10 @@ impl RethEnv {
 
         if to_fix.is_empty() {
             info!(target: "rayls::reth", block, "genesis account history already fully seeded; nothing to do");
-            return Ok(());
+            return Ok(0);
         }
 
-        let rocksdb = self.provider_factory.rocksdb_provider();
+        let rocksdb = provider_factory.rocksdb_provider();
         let mut batch = rocksdb.batch();
         for addr in &to_fix {
             let key = ShardedKey::last(*addr);
@@ -575,7 +589,7 @@ impl RethEnv {
             block,
             "seeded genesis account history for v2 archive"
         );
-        Ok(())
+        Ok(to_fix.len())
     }
 
     /// Re-key the genesis storage history to hashed keys so v2 archive reads
@@ -595,20 +609,34 @@ impl RethEnv {
     /// blocks. Only applicable to v2 (RocksDB) archives. Idempotent.
     #[cfg(feature = "archive-replay")]
     pub fn fix_genesis_history(&self) -> eyre::Result<()> {
+        Self::fix_genesis_history_with(
+            &self.provider_factory,
+            self.node_config.storage_settings().use_hashed_state(),
+        )?;
+        Ok(())
+    }
+
+    /// Testable core of [`Self::fix_genesis_history`]. Returns the number of
+    /// storage slots re-keyed (0 when everything is already correct).
+    #[cfg(feature = "archive-replay")]
+    pub(crate) fn fix_genesis_history_with(
+        provider_factory: &ProviderFactory<RaylsNode>,
+        use_hashed_state: bool,
+    ) -> eyre::Result<usize> {
         use alloy::primitives::keccak256;
         use reth_db::{models::storage_sharded_key::StorageShardedKey, BlockNumberList};
         use reth_provider::RocksDBProviderFactory;
 
-        if !self.node_config.storage_settings().use_hashed_state() {
+        if !use_hashed_state {
             info!(target: "rayls::reth", "v1 (plain) storage; genesis history needs no re-key");
-            return Ok(());
+            return Ok(0);
         }
 
-        let chain_spec = self.provider_factory.chain_spec();
+        let chain_spec = provider_factory.chain_spec();
         let genesis = chain_spec.genesis();
         let block = chain_spec.genesis_header().number;
 
-        let rocksdb = self.provider_factory.rocksdb_provider();
+        let rocksdb = provider_factory.rocksdb_provider();
         let mut batch = rocksdb.batch();
         let (mut fixed, mut already, mut multi_shard) = (0usize, 0usize, 0usize);
 
@@ -659,7 +687,7 @@ impl RethEnv {
 
         if fixed == 0 {
             info!(target: "rayls::reth", block, already, "genesis storage history already re-keyed; nothing to do");
-            return Ok(());
+            return Ok(0);
         }
         batch.commit()?;
 
@@ -671,6 +699,6 @@ impl RethEnv {
             block,
             "re-keyed genesis storage history to hashed keys"
         );
-        Ok(())
+        Ok(fixed)
     }
 }
