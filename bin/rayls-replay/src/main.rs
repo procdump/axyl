@@ -271,6 +271,20 @@ async fn run(cli: Cli) -> eyre::Result<()> {
         return Ok(());
     }
 
+    // AccountsHistory is cleared on first_sync and rebuild solely from AccountChangeSets.
+    // Genesis accounts whose code/nonce/balance
+    // never change after genesis produce no changeset entries and are therefore
+    // absent after the rebuild, causing historical eth_call to see empty code for
+    // those contracts.  Seeding them here ensures correct for new archival nodes.
+
+    archive_evm.fix_genesis_history()?;
+    archive_evm.fix_genesis_account_history()?;
+    info!(
+        target: "rayls_replay::main",
+        archive_out = %cli.archive_out.display(),
+        "genesis-history fix applied to freshly built archive"
+    );
+
     // close the DB envs before the copy so no MDBX handle still maps the files;
     // all three are unused past the flush above
     drop(snapshot_evm);
