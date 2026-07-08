@@ -1026,3 +1026,100 @@ async fn test_fix_genesis_history_rekeys_and_preserves_post_genesis() -> eyre::R
 
     Ok(())
 }
+
+/// Full-DB check for `fix_genesis_account_history`. Unlike storage, account
+/// history has no key mismatch (read and write both use the plain address), so
+/// genesis init already seeds it correctly and the fix is a no-op. It only has
+/// work to do after an `IndexAccountHistoryStage` first-sync clear, which this
+/// test simulates — and multi-shard accounts (post-genesis changesets) are left
+/// untouched.
+#[cfg(feature = "archive-replay")]
+#[tokio::test]
+async fn test_fix_genesis_account_history_seeds_after_clear_and_skips_multishard(
+) -> eyre::Result<()> {
+    use crate::{reth_env::RethEnv, traits::RaylsNode};
+    use reth_db::{models::ShardedKey, tables, BlockNumberList};
+    use reth_db_common::init::init_genesis_with_settings;
+    use reth_provider::{
+        providers::{RocksDBBuilder, StaticFileProvider},
+        ProviderFactory, RocksDBProviderFactory, StorageSettings, StorageSettingsCache,
+    };
+
+    let addr = Address::from([0x21u8; 20]); // immutable genesis account
+    let addr2 = Address::from([0x22u8; 20]); // multi-shard (post-genesis changes)
+    let genesis = rayls_infrastructure_types::test_genesis().extend_accounts([
+        (addr, GenesisAccount { balance: U256::from(1u64), ..Default::default() }),
+        (addr2, GenesisAccount { balance: U256::from(2u64), ..Default::default() }),
+    ]);
+
+    let tmp_dir = TempDir::new()?;
+    let datadir = tmp_dir.path().to_path_buf();
+    let db = Arc::new(reth_db::init_db(
+        datadir.join("db"),
+        reth_db::mdbx::DatabaseArguments::default(),
+    )?);
+    let rayls_chain_spec = Arc::new(
+        crate::chainspec::RaylsChainSpec::builder(Arc::new(RethChainSpec::from(genesis))).build(),
+    );
+    let rocksdb_provider =
+        RocksDBBuilder::new(datadir.join("rocksdb")).with_default_tables().build()?;
+    let static_files = StaticFileProvider::read_write(datadir.join("static_files"))?;
+    let runtime = reth_tasks::Runtime::with_existing_handle(tokio::runtime::Handle::current())?;
+    let provider_factory: ProviderFactory<RaylsNode> =
+        ProviderFactory::new(db, rayls_chain_spec, static_files, rocksdb_provider, runtime)?;
+    let settings = StorageSettings::v2();
+    provider_factory.set_storage_settings_cache(settings);
+    init_genesis_with_settings(&provider_factory, settings)?;
+
+    let rocksdb = provider_factory.rocksdb_provider();
+    let last = |a: Address| rocksdb.get::<tables::AccountsHistory>(ShardedKey::last(a));
+
+    // Genesis init already seeds account history correctly (plain address, no
+    // mismatch), so the fix has nothing to do.
+    assert!(
+        last(addr)?.is_some_and(|l| l.contains(0u64)),
+        "genesis init seeds AccountsHistory[addr] = [0]"
+    );
+    assert_eq!(
+        RethEnv::fix_genesis_account_history_with(&provider_factory, true)?,
+        0,
+        "account history already correct at genesis; fix is a no-op"
+    );
+
+    // Simulate IndexAccountHistoryStage's first-sync clear (what a normally-synced
+    // node does), then inject a multi-shard post-genesis account.
+    rocksdb.clear::<tables::AccountsHistory>()?;
+    {
+        let mut batch = rocksdb.batch();
+        batch.put::<tables::AccountsHistory>(
+            ShardedKey::new(addr2, 400u64),
+            &BlockNumberList::new([100u64, 400]).unwrap(),
+        )?;
+        batch.put::<tables::AccountsHistory>(
+            ShardedKey::last(addr2),
+            &BlockNumberList::new([900u64]).unwrap(),
+        )?;
+        batch.commit()?;
+    }
+
+    // The fix restores block 0 for the cleared immutable account...
+    let seeded = RethEnv::fix_genesis_account_history_with(&provider_factory, true)?;
+    assert!(seeded >= 1, "cleared single-shard genesis accounts are re-seeded");
+    assert!(last(addr)?.is_some_and(|l| l.contains(0u64)), "addr re-seeded with block 0");
+
+    // ...but leaves the multi-shard account untouched (assumed correctly indexed).
+    assert_eq!(
+        last(addr2)?.unwrap().iter().collect::<Vec<u64>>(),
+        vec![900],
+        "multi-shard account's open shard is untouched"
+    );
+    assert!(
+        !last(addr2)?.unwrap().contains(0u64),
+        "multi-shard account is not seeded with block 0"
+    );
+
+    // Idempotent.
+    assert_eq!(RethEnv::fix_genesis_account_history_with(&provider_factory, true)?, 0);
+
+    Ok(())
+}
