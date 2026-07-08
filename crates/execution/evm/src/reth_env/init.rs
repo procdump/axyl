@@ -469,4 +469,208 @@ impl RethEnv {
         info!(target: "rayls::reth", target_block, "unwind complete");
         Ok(())
     }
+
+    /// Seed the genesis account history for accounts that produce no changesets.
+    ///
+    /// `IndexAccountHistoryStage` clears `AccountsHistory` on its first run and
+    /// rebuilds from `AccountChangeSets`, so genesis accounts whose
+    /// code/nonce/balance never change again (immutable system contracts) lose
+    /// their block-0 entry entirely — historical `eth_call`/`eth_getCode`
+    /// returns empty for them.
+    ///
+    /// This re-inserts a genesis block-0 entry for every such account via a
+    /// read-merge-write so existing post-genesis shards are preserved. Accounts
+    /// with more than one shard already carry post-genesis changesets and are
+    /// left untouched. Only applicable to v2 (RocksDB) archives. Idempotent.
+    #[cfg(feature = "archive-replay")]
+    pub fn fix_genesis_account_history(&self) -> eyre::Result<()> {
+        use reth_db::{models::ShardedKey, BlockNumberList};
+        use reth_provider::RocksDBProviderFactory;
+        use std::collections::{HashMap, HashSet};
+
+        if !self.node_config.storage_settings().use_hashed_state() {
+            info!(target: "rayls::reth", "v1 (plain) storage; account history needs no fix");
+            return Ok(());
+        }
+
+        let chain_spec = self.provider_factory.chain_spec();
+        let genesis = chain_spec.genesis();
+        let block = chain_spec.genesis_header().number;
+
+        // Single pass: collect which addresses already have a block-0 entry
+        // (idempotency guard) and how many shards each address has (safety guard).
+        let (already_fixed, shard_counts): (HashSet<Address>, HashMap<Address, usize>) = {
+            let rocksdb = self.provider_factory.rocksdb_provider();
+            let mut fixed = HashSet::new();
+            let mut counts: HashMap<Address, usize> = HashMap::new();
+            for entry in rocksdb.iter::<reth_db::tables::AccountsHistory>()? {
+                let (key, value) = entry?;
+                *counts.entry(key.key).or_insert(0) += 1;
+                if value.contains(block) {
+                    fixed.insert(key.key);
+                }
+            }
+            (fixed, counts)
+        };
+
+        if !already_fixed.is_empty() {
+            info!(
+                target: "rayls::reth",
+                already_fixed = already_fixed.len(),
+                "idempotency: skipping accounts already present in AccountsHistory at genesis block"
+            );
+        }
+
+        // Accounts with more than one shard have post-genesis changesets that were
+        // correctly indexed by IndexAccountHistoryStage.
+        let multi_shard_skipped = genesis
+            .alloc
+            .keys()
+            .filter(|addr| shard_counts.get(*addr).copied().unwrap_or(0) > 1)
+            .count();
+
+        if multi_shard_skipped > 0 {
+            info!(
+                target: "rayls::reth",
+                multi_shard_skipped,
+                "skipping genesis accounts with multiple history shards (post-genesis changesets present)"
+            );
+        }
+
+        let to_fix: Vec<Address> = genesis
+            .alloc
+            .keys()
+            .filter(|addr| {
+                !already_fixed.contains(*addr) && shard_counts.get(*addr).copied().unwrap_or(0) <= 1
+            })
+            .copied()
+            .collect();
+
+        if to_fix.is_empty() {
+            info!(target: "rayls::reth", block, "genesis account history already fully seeded; nothing to do");
+            return Ok(());
+        }
+
+        let rocksdb = self.provider_factory.rocksdb_provider();
+        let mut batch = rocksdb.batch();
+        for addr in &to_fix {
+            let key = ShardedKey::last(*addr);
+            let existing = rocksdb.get::<reth_db::tables::AccountsHistory>(key.clone())?;
+            let merged = match existing {
+                Some(existing_list) => {
+                    let blocks: Vec<u64> =
+                        core::iter::once(block).chain(existing_list.iter()).collect();
+                    BlockNumberList::new(blocks)
+                        .map_err(|e| eyre::eyre!("failed to build block number list: {e}"))?
+                }
+                None => BlockNumberList::new([block]).expect("single block always fits"),
+            };
+            batch.put::<reth_db::tables::AccountsHistory>(key, &merged)?;
+        }
+        batch.commit()?;
+
+        info!(
+            target: "rayls::reth",
+            accounts = to_fix.len(),
+            block,
+            "seeded genesis account history for v2 archive"
+        );
+        Ok(())
+    }
+
+    /// Re-key the genesis storage history to hashed keys so v2 archive reads
+    /// reconstruct genesis-seeded storage instead of returning 0x0.
+    ///
+    /// reth's genesis writer (`insert_storage_history`) keys `StoragesHistory`
+    /// by the plain slot, but the v2 read looks it up by `keccak256(slot)`, so
+    /// genesis-seeded storage (e.g. the static validator set) reads as
+    /// `NotYetWritten` -> 0x0. This re-emits the genesis block entry under the
+    /// hashed slot.
+    ///
+    /// The entry is **merged into the earliest existing shard** for each
+    /// `(address, hashed slot)` via a read-merge-write, rather than overwriting
+    /// the open (`u64::MAX`) shard. That keeps the post-genesis history of a
+    /// genesis slot that was also modified later (e.g. a balance / registry slot)
+    /// and places block 0 in the shard the historical read consults for early
+    /// blocks. Only applicable to v2 (RocksDB) archives. Idempotent.
+    #[cfg(feature = "archive-replay")]
+    pub fn fix_genesis_history(&self) -> eyre::Result<()> {
+        use alloy::primitives::keccak256;
+        use reth_db::{models::storage_sharded_key::StorageShardedKey, BlockNumberList};
+        use reth_provider::RocksDBProviderFactory;
+
+        if !self.node_config.storage_settings().use_hashed_state() {
+            info!(target: "rayls::reth", "v1 (plain) storage; genesis history needs no re-key");
+            return Ok(());
+        }
+
+        let chain_spec = self.provider_factory.chain_spec();
+        let genesis = chain_spec.genesis();
+        let block = chain_spec.genesis_header().number;
+
+        let rocksdb = self.provider_factory.rocksdb_provider();
+        let mut batch = rocksdb.batch();
+        let (mut fixed, mut already, mut multi_shard) = (0usize, 0usize, 0usize);
+
+        for (addr, account) in genesis.alloc.iter() {
+            let Some(storage) = account.storage.as_ref() else { continue };
+            for slot in storage.keys() {
+                let hashed = keccak256(slot);
+                // All shards for this (address, hashed slot), ascending by highest
+                // block. A cheap per-slot prefix scan, not an O(N) full-table scan.
+                let shards = rocksdb.storage_history_shards(*addr, hashed)?;
+
+                // Idempotency: a prior run already placed the genesis block.
+                if shards.iter().any(|(_, list)| list.contains(block)) {
+                    already += 1;
+                    continue;
+                }
+
+                match shards.first() {
+                    // No history yet (immutable genesis slot, never touched after
+                    // genesis): open a fresh `::last` shard holding just the block.
+                    None => {
+                        let key = StorageShardedKey::last(*addr, hashed);
+                        batch.put::<reth_db::tables::StoragesHistory>(
+                            key,
+                            &BlockNumberList::new([block]).expect("single block always fits"),
+                        )?;
+                    }
+                    // Prepend the genesis block into the earliest shard, preserving
+                    // its (and every later shard's) post-genesis history. The read
+                    // for an early block consults this shard, so block 0 belongs here.
+                    Some((earliest_key, earliest_list)) => {
+                        if shards.len() > 1 {
+                            multi_shard += 1;
+                        }
+                        let blocks: Vec<u64> =
+                            core::iter::once(block).chain(earliest_list.iter()).collect();
+                        let merged = BlockNumberList::new(blocks)
+                            .map_err(|e| eyre::eyre!("failed to build block number list: {e}"))?;
+                        batch.put::<reth_db::tables::StoragesHistory>(
+                            earliest_key.clone(),
+                            &merged,
+                        )?;
+                    }
+                }
+                fixed += 1;
+            }
+        }
+
+        if fixed == 0 {
+            info!(target: "rayls::reth", block, already, "genesis storage history already re-keyed; nothing to do");
+            return Ok(());
+        }
+        batch.commit()?;
+
+        info!(
+            target: "rayls::reth",
+            slots = fixed,
+            already,
+            multi_shard,
+            block,
+            "re-keyed genesis storage history to hashed keys"
+        );
+        Ok(())
+    }
 }
