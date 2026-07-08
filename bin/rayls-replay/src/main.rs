@@ -163,8 +163,6 @@ async fn run(cli: Cli) -> eyre::Result<()> {
         "loaded network configuration"
     );
 
-    let consensus_store = open_db(&consensus_db);
-
     // archive blocks build with the snapshot's committed close-epoch tally,
     // staged into `tally_store` per close block; snapshot env never builds.
     let tally_store = SnapshotTallyStore::default();
@@ -213,6 +211,12 @@ async fn run(cli: Cli) -> eyre::Result<()> {
         );
         return Ok(());
     }
+
+    // snapshot-only setup: the consensus DB is the replay oracle and is unused by
+    // the fix-genesis and unwind early-return paths above, so open it only once
+    // we know we're actually replaying (avoids touching a dummy/bad path in those
+    // maintenance modes).
+    let consensus_store = open_db(&consensus_db);
 
     let snapshot_evm = RethEnv::new_for_archive_replay(
         Arc::clone(&base_chain),

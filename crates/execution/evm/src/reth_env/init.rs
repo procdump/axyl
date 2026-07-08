@@ -611,16 +611,27 @@ impl RethEnv {
             })
             .collect();
 
-        // Idempotency guard: scan StoragesHistory for (addr, hashed_slot) pairs
-        // already containing `block`. Scoping the rocksdb reference ensures it's
+        // Idempotency guard: for each genesis (addr, hashed_slot), point-read the
+        // last shard and record those already carrying `block`. insert_storage_history
+        // writes block 0 into the `StorageShardedKey::last` shard, so that shard is the
+        // only place a prior run could have placed it — an O(k) check over the genesis
+        // slots instead of an O(N) scan of the whole StoragesHistory table (which now
+        // runs on every archive build). Scoping the rocksdb reference ensures it's
         // dropped before the write transaction is opened below.
         let already_fixed: HashSet<(Address, B256)> = {
+            use reth_db::models::storage_sharded_key::StorageShardedKey;
             let rocksdb = self.provider_factory.rocksdb_provider();
             let mut set = HashSet::new();
-            for entry in rocksdb.iter::<reth_db::tables::StoragesHistory>()? {
-                let (key, value) = entry?;
-                if value.contains(block) {
-                    set.insert((key.address, key.sharded_key.key));
+            for (addr, account) in &rehashed {
+                let Some(storage) = account.storage.as_ref() else { continue };
+                for slot in storage.keys() {
+                    if let Some(list) = rocksdb.get::<reth_db::tables::StoragesHistory>(
+                        StorageShardedKey::last(*addr, *slot),
+                    )? {
+                        if list.contains(block) {
+                            set.insert((*addr, *slot));
+                        }
+                    }
                 }
             }
             set
@@ -637,8 +648,7 @@ impl RethEnv {
                     storage.retain(|slot, _| !already_fixed.contains(&(*addr, *slot)));
                 }
             }
-            rehashed
-                .retain(|(_, account)| account.storage.as_ref().map_or(false, |s| !s.is_empty()));
+            rehashed.retain(|(_, account)| account.storage.as_ref().is_some_and(|s| !s.is_empty()));
         }
 
         let slots: usize =
