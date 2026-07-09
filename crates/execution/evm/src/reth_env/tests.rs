@@ -963,7 +963,11 @@ async fn test_fix_genesis_history_rekeys_and_preserves_post_genesis() -> eyre::R
     }
 
     // Simulate post-genesis history under the HASHED keys, as replay's indexer
-    // would append: slot_b one open shard [5]; slot_c sealed [100,400] + open [900].
+    // would append:
+    //   slot_b — one open shard [5] (has room → prepend in place)
+    //   slot_c — a FULL sealed shard [1..=2000] + a full open shard [2001..=4000],
+    //            so prepending block 0 (total 4001) must re-chunk into three
+    //            <=2000 shards (the cascade / overflow case).
     {
         let rocksdb = provider_factory.rocksdb_provider();
         let mut batch = rocksdb.batch();
@@ -972,12 +976,12 @@ async fn test_fix_genesis_history_rekeys_and_preserves_post_genesis() -> eyre::R
             &BlockNumberList::new([5u64]).unwrap(),
         )?;
         batch.put::<tables::StoragesHistory>(
-            StorageShardedKey::new(addr, hc, 400),
-            &BlockNumberList::new([100u64, 400]).unwrap(),
+            StorageShardedKey::new(addr, hc, 2000),
+            &BlockNumberList::new(1u64..=2000).unwrap(),
         )?;
         batch.put::<tables::StoragesHistory>(
             StorageShardedKey::last(addr, hc),
-            &BlockNumberList::new([900u64]).unwrap(),
+            &BlockNumberList::new(2001u64..=4000).unwrap(),
         )?;
         batch.commit()?;
     }
@@ -1005,17 +1009,24 @@ async fn test_fix_genesis_history_rekeys_and_preserves_post_genesis() -> eyre::R
         "block 5 must survive (no clobber)"
     );
 
-    // slot_c (multi-shard) -> earliest shard gets 0 prepended; open shard untouched.
+    // slot_c (full first shard) -> re-chunked so block 0 lands in the earliest
+    // shard, every original block is preserved, and no shard exceeds the limit.
     let c = rocksdb.storage_history_shards(addr, hc)?; // ascending by highest block
+    assert_eq!(c.len(), 3, "4001 blocks re-chunk into three shards, got {}", c.len());
+    assert!(
+        c.iter().all(|(_, l)| (l.len() as usize) <= 2000),
+        "no shard may exceed NUM_OF_INDICES_IN_SHARD (2000)"
+    );
+    assert!(c[0].1.contains(0u64), "genesis block lands in the earliest shard");
     assert_eq!(
-        c[0].1.iter().collect::<Vec<u64>>(),
-        vec![0, 100, 400],
-        "genesis prepended into the earliest shard"
+        c.last().unwrap().0.sharded_key.highest_block_number,
+        u64::MAX,
+        "the last shard is the open (u64::MAX) shard"
     );
     assert_eq!(
-        c.last().unwrap().1.iter().collect::<Vec<u64>>(),
-        vec![900],
-        "the open shard's post-genesis history is preserved"
+        c.iter().flat_map(|(_, l)| l.iter()).collect::<Vec<u64>>(),
+        (0u64..=4000).collect::<Vec<u64>>(),
+        "all blocks preserved, sorted, no duplicates or loss"
     );
 
     // Idempotency: a second run is a no-op.
@@ -1023,6 +1034,11 @@ async fn test_fix_genesis_history_rekeys_and_preserves_post_genesis() -> eyre::R
     assert_eq!(again, 0, "second run must re-key nothing");
     assert_eq!(blocks(&rocksdb.storage_history_shards(addr, ha)?), vec![0]);
     assert_eq!(blocks(&rocksdb.storage_history_shards(addr, hb)?), vec![0, 5]);
+    assert_eq!(
+        blocks(&rocksdb.storage_history_shards(addr, hc)?),
+        (0u64..=4000).collect::<Vec<u64>>(),
+        "re-chunked slot is untouched on the second run"
+    );
 
     Ok(())
 }

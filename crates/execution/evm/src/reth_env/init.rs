@@ -606,7 +606,10 @@ impl RethEnv {
     /// the open (`u64::MAX`) shard. That keeps the post-genesis history of a
     /// genesis slot that was also modified later (e.g. a balance / registry slot)
     /// and places block 0 in the shard the historical read consults for early
-    /// blocks. Only applicable to v2 (RocksDB) archives. Idempotent.
+    /// blocks. When prepending would push the earliest shard past
+    /// `NUM_OF_INDICES_IN_SHARD` (a hot genesis slot with >= that many
+    /// post-genesis changes), the slot's shards are re-chunked so none exceeds
+    /// the limit. Only applicable to v2 (RocksDB) archives. Idempotent.
     #[cfg(feature = "archive-replay")]
     pub fn fix_genesis_history(&self) -> eyre::Result<()> {
         Self::fix_genesis_history_with(
@@ -624,7 +627,12 @@ impl RethEnv {
         use_hashed_state: bool,
     ) -> eyre::Result<usize> {
         use alloy::primitives::keccak256;
-        use reth_db::{models::storage_sharded_key::StorageShardedKey, BlockNumberList};
+        use reth_db::{
+            models::{
+                sharded_key::NUM_OF_INDICES_IN_SHARD, storage_sharded_key::StorageShardedKey,
+            },
+            BlockNumberList,
+        };
         use reth_provider::RocksDBProviderFactory;
 
         if !use_hashed_state {
@@ -638,7 +646,7 @@ impl RethEnv {
 
         let rocksdb = provider_factory.rocksdb_provider();
         let mut batch = rocksdb.batch();
-        let (mut fixed, mut already, mut multi_shard) = (0usize, 0usize, 0usize);
+        let (mut fixed, mut already, mut rechunked) = (0usize, 0usize, 0usize);
 
         for (addr, account) in genesis.alloc.iter() {
             let Some(storage) = account.storage.as_ref() else { continue };
@@ -664,21 +672,55 @@ impl RethEnv {
                             &BlockNumberList::new([block]).expect("single block always fits"),
                         )?;
                     }
-                    // Prepend the genesis block into the earliest shard, preserving
-                    // its (and every later shard's) post-genesis history. The read
-                    // for an early block consults this shard, so block 0 belongs here.
                     Some((earliest_key, earliest_list)) => {
-                        if shards.len() > 1 {
-                            multi_shard += 1;
+                        // Fast path: a single shard (the open `::last`) with room —
+                        // prepend the genesis block in place. The read for an early
+                        // block consults this shard, so block 0 belongs here.
+                        if shards.len() == 1
+                            && (earliest_list.len() as usize) < NUM_OF_INDICES_IN_SHARD
+                        {
+                            let blocks: Vec<u64> =
+                                core::iter::once(block).chain(earliest_list.iter()).collect();
+                            let merged = BlockNumberList::new(blocks).map_err(|e| {
+                                eyre::eyre!("failed to build block number list: {e}")
+                            })?;
+                            batch.put::<reth_db::tables::StoragesHistory>(
+                                earliest_key.clone(),
+                                &merged,
+                            )?;
+                        } else {
+                            // Prepending would overflow the earliest shard (a hot
+                            // genesis slot with a full first shard). Gather all of the
+                            // slot's blocks, prepend genesis, delete the old shards and
+                            // re-split into <= NUM_OF_INDICES_IN_SHARD chunks so none
+                            // exceeds the limit. `all` is globally sorted: block 0 is
+                            // smaller than every post-genesis change, and both the shard
+                            // order and each shard's list are ascending.
+                            rechunked += 1;
+                            let mut all: Vec<u64> = core::iter::once(block).collect();
+                            for (_, list) in &shards {
+                                all.extend(list.iter());
+                            }
+                            for (key, _) in &shards {
+                                batch.delete::<reth_db::tables::StoragesHistory>(key.clone())?;
+                            }
+                            let mut i = 0;
+                            while i < all.len() {
+                                let end = (i + NUM_OF_INDICES_IN_SHARD).min(all.len());
+                                let chunk = &all[i..end];
+                                let key = if end == all.len() {
+                                    StorageShardedKey::last(*addr, hashed)
+                                } else {
+                                    StorageShardedKey::new(*addr, hashed, chunk[chunk.len() - 1])
+                                };
+                                let list =
+                                    BlockNumberList::new(chunk.iter().copied()).map_err(|e| {
+                                        eyre::eyre!("failed to build block number list: {e}")
+                                    })?;
+                                batch.put::<reth_db::tables::StoragesHistory>(key, &list)?;
+                                i = end;
+                            }
                         }
-                        let blocks: Vec<u64> =
-                            core::iter::once(block).chain(earliest_list.iter()).collect();
-                        let merged = BlockNumberList::new(blocks)
-                            .map_err(|e| eyre::eyre!("failed to build block number list: {e}"))?;
-                        batch.put::<reth_db::tables::StoragesHistory>(
-                            earliest_key.clone(),
-                            &merged,
-                        )?;
                     }
                 }
                 fixed += 1;
@@ -695,7 +737,7 @@ impl RethEnv {
             target: "rayls::reth",
             slots = fixed,
             already,
-            multi_shard,
+            rechunked,
             block,
             "re-keyed genesis storage history to hashed keys"
         );
