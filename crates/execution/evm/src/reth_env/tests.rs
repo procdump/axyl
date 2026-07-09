@@ -988,9 +988,23 @@ async fn test_fix_genesis_history_rekeys_and_preserves_post_genesis() -> eyre::R
 
     // Run the fix.
     let fixed = RethEnv::fix_genesis_history_with(&provider_factory, true)?;
-    assert!(fixed >= 3, "expected at least our three slots re-keyed, got {fixed}");
+    assert!(fixed > 0, "fix must re-key at least the injected slots");
 
     let rocksdb = provider_factory.rocksdb_provider();
+
+    // Strong outcome check (not a loose count): every genesis alloc storage slot
+    // now resolves under its hashed key at block 0. Catches any slot the fix
+    // silently missed. Iterates the alloc from the chain spec (genesis was moved).
+    for (a, account) in provider_factory.chain_spec().genesis().alloc.iter() {
+        let Some(s) = account.storage.as_ref() else { continue };
+        for slot in s.keys() {
+            let shards = rocksdb.storage_history_shards(*a, keccak256(*slot))?;
+            assert!(
+                shards.iter().any(|(_, l)| l.contains(0u64)),
+                "genesis slot {slot} on {a} must carry block 0 under its hashed key after the fix"
+            );
+        }
+    }
     let blocks = |shards: &[(StorageShardedKey, BlockNumberList)]| -> Vec<u64> {
         shards.iter().flat_map(|(_, l)| l.iter()).collect()
     };

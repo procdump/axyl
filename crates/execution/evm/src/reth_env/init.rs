@@ -482,6 +482,14 @@ impl RethEnv {
     /// read-merge-write so existing post-genesis shards are preserved. Accounts
     /// with more than one shard already carry post-genesis changesets and are
     /// left untouched. Only applicable to v2 (RocksDB) archives. Idempotent.
+    ///
+    /// Limitation: on an archive whose `AccountsHistory` was cleared and rebuilt
+    /// from `AccountChangeSets` by `IndexAccountHistoryStage` (a normally-synced
+    /// node — not `rayls-replay`), a *multi-shard* genesis account is skipped here
+    /// and genesis has no changeset to rebuild from, so it never regains its
+    /// block-0 entry. This is a non-issue for replay-built archives, where that
+    /// stage never runs; account history is written once by genesis init and only
+    /// appended to.
     #[cfg(feature = "archive-replay")]
     pub fn fix_genesis_account_history(&self) -> eyre::Result<()> {
         Self::fix_genesis_account_history_with(
@@ -610,6 +618,11 @@ impl RethEnv {
     /// `NUM_OF_INDICES_IN_SHARD` (a hot genesis slot with >= that many
     /// post-genesis changes), the slot's shards are re-chunked so none exceeds
     /// the limit. Only applicable to v2 (RocksDB) archives. Idempotent.
+    ///
+    /// This adds the entry under the hashed key; the original plain-slot entry
+    /// written by genesis init is intentionally left in place. It's never read by
+    /// v2 (which looks up the hashed key) and deleting it is avoidable risk for no
+    /// functional gain, so it's kept as harmless dead weight rather than removed.
     #[cfg(feature = "archive-replay")]
     pub fn fix_genesis_history(&self) -> eyre::Result<()> {
         Self::fix_genesis_history_with(
@@ -701,6 +714,14 @@ impl RethEnv {
                             for (_, list) in &shards {
                                 all.extend(list.iter());
                             }
+                            // `all` must be strictly ascending for BlockNumberList /
+                            // the shard split: genesis block < every post-genesis block,
+                            // storage_history_shards returns shards ascending, and each
+                            // shard's list is ascending. Guard that invariant.
+                            debug_assert!(
+                                all.windows(2).all(|w| w[0] < w[1]),
+                                "re-chunk block list must be strictly ascending"
+                            );
                             for (key, _) in &shards {
                                 batch.delete::<reth_db::tables::StoragesHistory>(key.clone())?;
                             }

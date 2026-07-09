@@ -93,7 +93,7 @@ struct Cli {
     /// 2. AccountsHistory seed: IndexAccountHistoryStage clears AccountsHistory on first sync and
     ///    never re-inserts accounts whose code/nonce/balance never change after genesis (immutable
     ///    system contracts). Historical `eth_call` returns empty contract code for those accounts.
-    #[arg(long)]
+    #[arg(long = "fix-genesis-history")]
     fix_genesis_history: bool,
 
     /// Verify state root after every block (slow). Default: epoch boundaries only.
@@ -280,7 +280,7 @@ async fn run(cli: Cli) -> eyre::Result<()> {
     }
 
     // archive is complete: repair the two genesis-history issues so it boots
-    // correct without a separate --fix_genesis_history pass. The re-key/seed
+    // correct without a separate --fix-genesis-history pass. The re-key/seed
     // read-merge with existing history, so running here (after replay) preserves
     // every post-genesis change; a no-op on v1 archives and on any slot/account
     // already carrying the genesis block. Only on normal completion — the
