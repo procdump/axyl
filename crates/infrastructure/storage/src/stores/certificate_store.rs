@@ -7,28 +7,13 @@ use crate::{
     StoreResult,
 };
 use rayls_infrastructure_types::{
-    AuthorityIdentifier, Certificate, CertificateDigest, Database, DbTx, DbTxMut, Hash, Round,
+    AuthorityIdentifier, Certificate, CertificateDigest, Database, DbTx, DbTxMut, Hash,
+    ReadTimeout, Round,
 };
 use rayls_infrastructure_utils::NotifyRead;
 
 static NOTIFY_SUBSCRIBERS: LazyLock<NotifyRead<CertificateDigest, Certificate>> =
     LazyLock::new(NotifyRead::new);
-
-/// Whether a read may opt out of the MDBX read-transaction timeout
-/// (`max_read_transaction_duration`, default 30s).
-///
-/// The timeout exists to stop leaked or hung readers from pinning the MVCC free-list and
-/// starving the writer. A bounded one-shot recovery scan (`prime_consensus`, DAG rebuild) can
-/// legitimately outlast it under I/O pressure — and being force-reset mid-recovery turns a
-/// transient storage stall into a hard failure. Such reads pass `Exempt` to run to completion;
-/// everything on a latency-sensitive path stays `Enforced`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadTimeout {
-    /// Subject to the configured read-transaction timeout.
-    Enforced,
-    /// Opt out of the timeout for a bounded, latency-insensitive scan.
-    Exempt,
-}
 
 /// Certificate persistence with round-based indexing and pub/sub on writes.
 ///
