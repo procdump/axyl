@@ -35,9 +35,12 @@ impl RethEnv {
         // persist when canonical head is far enough ahead of last persisted block
         // and no persistence is already in-flight (matching reth's advance_persistence)
         if !state.in_progress() && state.should_persist(header.number) {
+            // Keep `persistence_threshold` (>=1) blocks resident in CIM so the
+            // canonical head is always served from memory, not a racing MDBX read.
             let blocks = Self::get_canonical_blocks_to_persist(
                 &self.canonical_in_memory_state(),
                 state.last_persisted_block.number,
+                state.persistence_threshold.max(1),
             );
             if !blocks.is_empty() {
                 let count = blocks.len();
@@ -105,19 +108,35 @@ impl RethEnv {
 
     /// Extract canonical blocks from in-memory state that need to be persisted.
     ///
-    /// Iterates by block number from `last_persisted + 1` to the canonical
-    /// head, using `state_by_number()` to look up each block. Blocks
-    /// inserted via batch `update_chain()` DO have parent links, but we
+    /// Iterates by block number from `last_persisted + 1` up to
+    /// `canonical_head - keep_in_memory`, using `state_by_number()` to look up
+    /// each block. The top `keep_in_memory` blocks (the head and its most recent
+    /// ancestors) are deliberately left resident in [`CanonicalInMemoryState`]
+    /// and never persisted here — so they are never evicted by the subsequent
+    /// `remove_persisted_blocks`, and a `latest` RPC read is always served from
+    /// the in-memory overlay rather than racing a not-yet-visible MDBX commit
+    /// (the source of intermittent empty `eth_call` results at the tip). Pass
+    /// `0` to persist everything up to the head (e.g. epoch-boundary flush).
+    ///
+    /// Blocks inserted via batch `update_chain()` DO have parent links, but we
     /// iterate by number for consistency with the persistence range.
     fn get_canonical_blocks_to_persist(
         canonical_in_memory_state: &CanonicalInMemoryState,
         last_persisted_block_number: u64,
+        keep_in_memory: u64,
     ) -> Vec<ExecutedBlock> {
         let canonical_head = canonical_in_memory_state.get_canonical_block_number();
-        let count = canonical_head.saturating_sub(last_persisted_block_number) as usize;
+        // Persist only up to `head - keep_in_memory`; the head + `keep_in_memory`
+        // ancestors must stay in CIM to serve `latest` without hitting the MDBX
+        // commit-visibility gap. Nothing to do if that leaves no new blocks.
+        let persist_target = canonical_head.saturating_sub(keep_in_memory);
+        if persist_target <= last_persisted_block_number {
+            return Vec::new();
+        }
+        let count = persist_target.saturating_sub(last_persisted_block_number) as usize;
         let mut blocks_to_persist = Vec::with_capacity(count);
 
-        for number in (last_persisted_block_number + 1)..=canonical_head {
+        for number in (last_persisted_block_number + 1)..=persist_target {
             if let Some(block_state) = canonical_in_memory_state.state_by_number(number) {
                 blocks_to_persist.push(block_state.block());
             } else {
@@ -134,6 +153,8 @@ impl RethEnv {
             count = blocks_to_persist.len(),
             last_persisted_block_number,
             canonical_head,
+            persist_target,
+            keep_in_memory,
             "extracted blocks to persist from canonical in-memory state",
         );
         blocks_to_persist.sort_unstable_by_key(|b| b.recovered_block.number());
@@ -284,9 +305,12 @@ impl RethEnv {
                 state.pending_started_at = None;
             }
 
+            // Epoch-boundary flush must persist everything up to the head before the
+            // consensus DB is cleared, so keep no buffer here.
             let blocks = RethEnv::get_canonical_blocks_to_persist(
                 &canonical_in_memory_state,
                 state.last_persisted_block.number,
+                0,
             );
 
             let total_blocks_to_persist = blocks.len();
