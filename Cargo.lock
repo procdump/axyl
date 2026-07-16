@@ -8413,7 +8413,7 @@ dependencies = [
 
 [[package]]
 name = "rayls-relay"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "eyre",
  "futures",
