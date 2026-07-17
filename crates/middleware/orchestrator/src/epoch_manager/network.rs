@@ -47,7 +47,35 @@ pub(crate) fn decide_node_mode(
         return match prior_mode {
             NodeMode::CvvActive => (NodeMode::CvvActive, "prior-mode-active"),
             NodeMode::CvvInactive => (NodeMode::CvvInactive, "prior-mode-inactive"),
-            NodeMode::Observer => (NodeMode::Observer, "prior-mode-observer"),
+            // ============================================================================
+            // XXX / REVISIT — REVIEWER PLEASE SCRUTINIZE THIS ARM
+            // ============================================================================
+            // NEW behavior: promote a dynamic observer that has just been admitted to the
+            // committee, instead of leaving it Observer forever ("prior-mode-observer").
+            //
+            // Reaching here means: in the on-chain committee (`in_committee`), NOT a configured
+            // observer (`observer_flag` handled above), yet still running as Observer — i.e. a node
+            // that was following as a dynamic observer and has just been admitted to the committee
+            // (e.g. freshly staked). Join as CvvInactive so it catches up on the boundary WITHOUT
+            // proposing/voting yet; the bridge subscriber then requests CvvActive once synced.
+            // Staying Observer here leaves a silent committee member — counted toward quorum but
+            // never proposing/certifying — which stalls consensus (observed: total chain stall
+            // when a staked node stayed Observer).
+            //
+            // REVISIT — open questions the reviewer should weigh in on:
+            //   1. Is `decide_node_mode` the right layer, vs. an explicit stake→promote signal? Two
+            //      other Observer-stickiness guards exist (run_mode_transition,
+            //      request_mode_transition) and are deliberately sticky; this bypasses that intent
+            //      at the epoch boundary only.
+            //   2. Can a node legitimately be `in_committee && !observer_flag && prior==Observer`
+            //      for a reason OTHER than "just staked in" (e.g. was kicked out then re-added
+            //      within one process lifetime, stale committee view)? If so, is CvvInactive still
+            //      correct, or could it start voting before it should?
+            //   3. Interaction with the DynamicCommitteeSize hardfork: promotion here is NOT
+            //      fork-gated, but the committee-growth that puts the node `in_committee` IS.
+            //      Confirm they can't disagree across the fork boundary.
+            // ============================================================================
+            NodeMode::Observer => (NodeMode::CvvInactive, "joined-committee"),
         };
     }
     if has_local_history {

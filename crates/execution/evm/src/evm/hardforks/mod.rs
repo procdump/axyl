@@ -120,7 +120,8 @@ where
             | RaylsHardFork::BatchDigestV2
             | RaylsHardFork::PrecompileGasFix
             | RaylsHardFork::TransactionLoadBalancing
-            | RaylsHardFork::EmptyOutputBlock => continue,
+            | RaylsHardFork::EmptyOutputBlock
+            | RaylsHardFork::DynamicCommitteeSize => continue,
         };
 
         // Pre-load accounts into cache and copy their real AccountInfo.

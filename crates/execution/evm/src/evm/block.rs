@@ -470,6 +470,28 @@ where
 
         let current_committee: Vec<ValidatorInfo> = self.get_epoch_committee_validators(epoch)?;
 
+        // Behind the DynamicCommitteeSize hardfork, size the NEXT committee to the number of
+        // currently-active validators instead of pinning it to the CURRENT committee's length.
+        // Pinning never let the committee grow: when a validator staked in, `shuffle_new_committee`
+        // enlarged the active set then truncated it back to the old size, randomly evicting an
+        // incumbent (one validator "taking another's place"). Sizing to the active set lets the
+        // committee grow when a validator stakes+activates and shrink when one exits. Bounded
+        // on-chain by `_checkCommitteeSize` (committee_size <= active_count via
+        // getValidators(Active)), and this returns exactly that count, so `concludeEpoch`
+        // accepts it.
+        let block_number = self.evm.block().number().saturating_to::<u64>();
+        if self.spec.is_dynamic_committee_size_active_at_block(block_number) {
+            let active_validators: Vec<ValidatorInfo> = self.get_active_validators()?;
+            info!(
+                target: "engine",
+                epoch,
+                current_committee_size = current_committee.len(),
+                active_validators = active_validators.len(),
+                "next_committee_size: dynamic — sizing next committee to the active validator set"
+            );
+            return Ok(active_validators.len());
+        }
+
         info!(
             target: "engine",
             epoch,
