@@ -2407,6 +2407,30 @@ fn test_decide_mode_observer_flag() {
     assert_eq!(reason, "observer-flag");
 }
 
+/// A dynamic observer that gets staked into the committee mid-process must promote, not stay
+/// Observer. It was following as an observer (`prior_mode = Observer`), is NOT a configured
+/// observer (`observer_flag = false`), and is now in the on-chain committee (`in_committee = true`)
+/// at a live epoch boundary (`initial_epoch = false`). It must join as CvvInactive to catch up —
+/// the bridge subscriber then requests CvvActive once synced. Leaving it Observer makes it a silent
+/// committee member (counted toward quorum but never proposing/certifying), which stalls consensus.
+#[test]
+fn test_decide_mode_observer_joins_committee_on_stake() {
+    let (mode, reason) = decide_node_mode(
+        true,               // in_committee (just staked in on-chain)
+        false,              // observer_flag (NOT a configured observer)
+        None,               // no explicit transition
+        false,              // live epoch boundary within the running process
+        NodeMode::Observer, // was following as a dynamic observer
+        true,               // has_local_history (followed the chain)
+    );
+    assert_eq!(
+        mode,
+        NodeMode::CvvInactive,
+        "newly-staked observer must join & catch up, not stay silent"
+    );
+    assert_eq!(reason, "joined-committee");
+}
+
 /// Chaos test scenario 4 reproduction: rapid flapping at epoch boundary.
 ///
 /// V4 enters epoch 4 after epoch 3 boundary. prime_consensus does
