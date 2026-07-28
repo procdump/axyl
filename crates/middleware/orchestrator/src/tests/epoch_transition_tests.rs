@@ -2431,6 +2431,27 @@ fn test_decide_mode_observer_joins_committee_on_stake() {
     assert_eq!(reason, "joined-committee");
 }
 
+/// The promotion fires regardless of local history: a node staked into the committee that never
+/// built local history (`has_local_history = false`) must still join as CvvInactive — it needs to
+/// catch up from peers, not boot CvvActive and start proposing before it has any chain state.
+#[test]
+fn test_decide_mode_observer_joins_committee_on_stake_no_history() {
+    let (mode, reason) = decide_node_mode(
+        true,               // in_committee (just staked in on-chain)
+        false,              // observer_flag (NOT a configured observer)
+        None,               // no explicit transition
+        false,              // live epoch boundary within the running process
+        NodeMode::Observer, // was following as a dynamic observer
+        false,              // has_local_history = false (never built local history)
+    );
+    assert_eq!(
+        mode,
+        NodeMode::CvvInactive,
+        "a staked observer with no local history must catch up, not go CvvActive"
+    );
+    assert_eq!(reason, "joined-committee");
+}
+
 /// Chaos test scenario 4 reproduction: rapid flapping at epoch boundary.
 ///
 /// V4 enters epoch 4 after epoch 3 boundary. prime_consensus does
