@@ -64,13 +64,13 @@ fn score_of(all_peers: &AllPeers, peer_id: &PeerId) -> f64 {
 /// Apply `Medium` penalties until the peer's score reaches the disconnect threshold, returning the
 /// last action. Deliberately stops short of the ban threshold.
 fn penalize_to_disconnect_threshold(all_peers: &mut AllPeers, peer_id: &PeerId) -> PeerAction {
-    let config = PeerConfig::default();
+    let config = ScoreConfig::default();
     let mut action = PeerAction::NoAction;
-    while score_of(all_peers, peer_id) > config.min_score_for_disconnect {
+    while score_of(all_peers, peer_id) > config.min_score_before_disconnect {
         action = all_peers.process_penalty(peer_id, Penalty::Medium);
     }
     assert!(
-        score_of(all_peers, peer_id) > config.min_score_for_ban,
+        score_of(all_peers, peer_id) > config.min_score_before_ban,
         "helper must stop between the disconnect and ban thresholds"
     );
     action
@@ -196,7 +196,7 @@ fn a_score_driven_ban_is_released_by_score_decay() {
     let actions = peers.heartbeat_maintenance();
 
     assert!(
-        score_of(&peers, &peer_id) > config.min_score_for_disconnect,
+        score_of(&peers, &peer_id) > config.score_config.min_score_before_disconnect,
         "precondition: the score must have decayed above the disconnect threshold"
     );
 
@@ -329,15 +329,15 @@ fn penalties_clamp_at_the_configured_floor() {
 /// land on the harsher side consistently, and one point above it must not.
 #[test]
 fn reputation_boundaries_are_inclusive_at_the_threshold() {
-    let config = PeerConfig::default();
+    let config = ScoreConfig::default();
     let mut peers = all_peers();
 
     // exactly on the disconnect threshold
     let at_threshold = connect_from(&mut peers, ip(22));
-    while score_of(&peers, &at_threshold) > config.min_score_for_disconnect {
+    while score_of(&peers, &at_threshold) > config.min_score_before_disconnect {
         peers.process_penalty(&at_threshold, Penalty::Medium);
     }
-    assert_eq!(score_of(&peers, &at_threshold), config.min_score_for_disconnect);
+    assert_eq!(score_of(&peers, &at_threshold), config.min_score_before_disconnect);
     assert_eq!(
         peers.get_peer(&at_threshold).expect("known").reputation(),
         Reputation::Disconnected,
@@ -346,7 +346,7 @@ fn reputation_boundaries_are_inclusive_at_the_threshold() {
 
     // one Mild above it
     let above = connect_from(&mut peers, ip(23));
-    while score_of(&peers, &above) > config.min_score_for_disconnect + 1.0 {
+    while score_of(&peers, &above) > config.min_score_before_disconnect + 1.0 {
         peers.process_penalty(&above, Penalty::Mild);
     }
     assert_eq!(
@@ -652,5 +652,150 @@ fn the_heartbeat_acts_on_a_disconnect_verdict() {
         actions.iter().any(|(id, action)| *id == peer_id
             && matches!(action, PeerAction::Disconnect | PeerAction::DisconnectWithPX)),
         "heartbeat reached a disconnect verdict but returned no action: {actions:?}"
+    );
+}
+
+// Provenance: what an IP charge is allowed to be derived from
+
+/// The IP ban table is a Sybil defense keyed on where a peer actually connected from. Charging it
+/// with addresses a peer merely claims lets that peer blocklist an address it does not control.
+#[test]
+fn only_observed_addresses_charge_the_ip_ban_table() {
+    let mut peers = all_peers();
+    let victim = ip(50);
+
+    // two throwaway identities, each connecting from its own address and then advertising the
+    // victim's address as one of its own in a peer record
+    for seed in 0..2u8 {
+        let (bls, network_key) = random_keys(seed);
+        let peer_id: PeerId = network_key.clone().into();
+        peers.update_connection_status(
+            &peer_id,
+            NewConnectionStatus::Connected {
+                multiaddr: create_multiaddr(Some(ip(51 + seed))),
+                direction: ConnectionDirection::Incoming,
+            },
+        );
+        peers.upsert_peer(bls, network_key, vec![create_multiaddr(Some(victim))]);
+
+        // each identity earns its own ban
+        peers.process_penalty(&peer_id, Penalty::Fatal);
+        peers.update_connection_status(&peer_id, NewConnectionStatus::Disconnected);
+    }
+
+    // INVARIANT: only the address this node observed the connection on is charged.
+    // CURRENT: `Peer::known_ip_addresses` reads `multiaddrs`, which `update_net` extends from the
+    // peer's own record, so two peers can blocklist any address they name.
+    assert!(
+        !peers.ip_banned(&victim),
+        "two peers blocklisted an address neither of them ever connected from"
+    );
+}
+
+/// Clearing a peer's ban is a decision other stores must hear about - the gossipsub blacklist and
+/// the kad routing table are repaired only by `PeerAction::Unban`.
+#[test]
+fn clearing_a_ban_on_dial_emits_an_unban_action() {
+    let mut peers = all_peers();
+    let peer_id = connect_from(&mut peers, ip(92));
+
+    peers.process_penalty(&peer_id, Penalty::Fatal);
+    peers.update_connection_status(&peer_id, NewConnectionStatus::Disconnected);
+    assert_eq!(peers.banned_peers.total(), 1, "precondition: the peer is banned and charged");
+
+    let action = peers.update_connection_status(&peer_id, NewConnectionStatus::Dialing);
+
+    // INVARIANT: a transition that clears the ban stores announces it.
+    // CURRENT: `handle_dialing_transition`'s `Banned` arm calls `remove_banned_peer` and then
+    // returns `NoAction`, so the peer is silently un-charged while the gossipsub blacklist and the
+    // kad routing entry stay as the ban left them.
+    assert!(
+        matches!(action, PeerAction::Unban(_)),
+        "ban cleared on dial without an Unban action: {action:?}"
+    );
+}
+
+/// The same law on the connect path. Accepting a connection from a banned peer releases the ban,
+/// so it carries the same obligation to announce it.
+#[test]
+fn clearing_a_ban_on_connect_emits_an_unban_action() {
+    let mut peers = all_peers();
+    let peer_id = connect_from(&mut peers, ip(99));
+
+    peers.process_penalty(&peer_id, Penalty::Fatal);
+    peers.update_connection_status(&peer_id, NewConnectionStatus::Disconnected);
+    assert_eq!(peers.banned_peers.total(), 1, "precondition: the peer is banned and charged");
+
+    let action = peers.update_connection_status(
+        &peer_id,
+        NewConnectionStatus::Connected {
+            multiaddr: create_multiaddr(Some(ip(99))),
+            direction: ConnectionDirection::Incoming,
+        },
+    );
+
+    assert!(
+        matches!(action, PeerAction::Unban(_)),
+        "ban cleared on connect without an Unban action: {action:?}"
+    );
+}
+
+// Configured thresholds
+
+/// The decay freeze and the ban verdict must agree about which peers are banned. A peer the freeze
+/// holds but the verdict calls merely disconnected has a score nothing can move and a state
+/// nothing can release, because every release path keys on the verdict.
+#[test]
+fn the_decay_freeze_agrees_with_the_ban_verdict() {
+    // an operator hardens the ban threshold
+    let config = PeerConfig {
+        score_config: ScoreConfig { min_score_before_ban: -15.0, ..Default::default() },
+        ..Default::default()
+    };
+    let mut peers = all_peers_with(config);
+
+    // one peer either side of the configured threshold
+    for (octet, penalties) in [(41u8, 2usize), (43, 4)] {
+        let peer_id = connect_from(&mut peers, ip(octet));
+        for _ in 0..penalties {
+            peers.process_penalty(&peer_id, Penalty::Medium);
+        }
+
+        let peer = peers.get_peer(&peer_id).expect("known");
+        assert_eq!(
+            peer.score().is_banned(),
+            peer.reputation().banned(),
+            "the freeze and the verdict disagree at score {}",
+            peer.score().aggregate_score()
+        );
+    }
+}
+
+/// The operator's configured thresholds are the ones enforced. A security control that reads as
+/// configured but is not is worse than no knob at all, because it converts an available mitigation
+/// into a false belief that the mitigation is applied.
+#[test]
+fn operator_configured_thresholds_are_enforced() {
+    // an operator relaxes the thresholds to stop false positives
+    let config = PeerConfig {
+        score_config: ScoreConfig {
+            min_score_before_disconnect: -60.0,
+            min_score_before_ban: -80.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut peers = all_peers_with(config);
+
+    let peer_id = connect_from(&mut peers, ip(42));
+    for _ in 0..4 {
+        peers.process_penalty(&peer_id, Penalty::Medium);
+    }
+    assert_eq!(score_of(&peers, &peer_id), -20.0, "precondition: the peer sits at -20");
+
+    assert_eq!(
+        peers.get_peer(&peer_id).expect("known").reputation(),
+        Reputation::Trusted,
+        "the disconnect threshold was configured to -60 but a peer at -20 was disconnected"
     );
 }
