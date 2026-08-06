@@ -21,7 +21,6 @@ use libp2p::{Multiaddr, PeerId};
 use rand::seq::SliceRandom as _;
 use rayls_infrastructure_types::{BlsPublicKey, NetworkPublicKey};
 use std::{
-    cmp::Reverse,
     collections::{BinaryHeap, HashMap, HashSet},
     net::IpAddr,
     time::{Duration, Instant},
@@ -92,7 +91,7 @@ impl AllPeers {
     ) {
         let peer_id: PeerId = network_key.clone().into();
         let trusted_peer = Peer::new_trusted(bls_public_key, network_key, addr);
-        let _ = self.banned_peers.remove_banned_peer(trusted_peer.known_ip_addresses());
+        let _ = self.banned_peers.remove_banned_peer(&peer_id);
         self.peers.insert(peer_id, trusted_peer);
     }
 
@@ -387,7 +386,7 @@ impl AllPeers {
                 }
                 ConnectionStatus::Banned { .. } => {
                     error!(target: "peer-manager", ?peer_id, "accepted a connection from a banned peer");
-                    self.banned_peers.remove_banned_peer(peer.known_ip_addresses());
+                    self.banned_peers.remove_banned_peer(peer_id);
                 }
                 ConnectionStatus::Disconnecting { .. } => {
                     warn!(target: "peer-manager", ?peer_id, "connected to a disconnecting peer")
@@ -417,7 +416,7 @@ impl AllPeers {
             match current_status {
                 ConnectionStatus::Banned { .. } => {
                     warn!(target: "peer-manager", ?peer_id, "dialing a banned peer");
-                    self.banned_peers.remove_banned_peer(peer.known_ip_addresses());
+                    self.banned_peers.remove_banned_peer(peer_id);
                 }
                 ConnectionStatus::Disconnected { .. } => {
                     self.disconnected_peers = self.disconnected_peers.saturating_sub(1);
@@ -488,7 +487,7 @@ impl AllPeers {
         // update peer's status
         if let Some(peer) = self.peers.get_mut(peer_id) {
             peer.set_connection_status(ConnectionStatus::Banned { instant: Instant::now() });
-            self.banned_peers.add_banned_peer(peer);
+            self.banned_peers.add_banned_peer(peer_id, peer);
             let banned_ips = peer
                 .known_ip_addresses()
                 .filter(|ip| !already_banned_ips.contains(ip))
@@ -532,6 +531,10 @@ impl AllPeers {
             ConnectionStatus::Banned { .. } => {
                 // banned peers should already be disconnected
                 error!(target: "peer-manager", ?peer_id, "disconnecting from a banned peer - banned peer should already be disconnected");
+
+                // the peer is leaving the banned state, so its charge must be released here or it
+                // outlives the ban and the next ban charges the same peer twice
+                self.banned_peers.remove_banned_peer(peer_id);
             }
             ConnectionStatus::Connected { .. } | ConnectionStatus::Dialing { .. } => {
                 // only a healthy peer evicted for connection limits is worth helping find
@@ -558,7 +561,7 @@ impl AllPeers {
         if let Some(peer) = self.peers.get_mut(peer_id) {
             match current_state {
                 ConnectionStatus::Disconnected { .. } => {
-                    self.banned_peers.add_banned_peer(peer);
+                    self.banned_peers.add_banned_peer(peer_id, peer);
                     self.disconnected_peers = self.disconnected_peers.saturating_sub(1);
                     let already_banned_ips = self.banned_peers.banned_ips();
 
@@ -592,7 +595,7 @@ impl AllPeers {
                 }
                 ConnectionStatus::Unknown => {
                     warn!(target: "peer-manager", ?peer_id, "banning an unknown peer");
-                    self.banned_peers.add_banned_peer(peer);
+                    self.banned_peers.add_banned_peer(peer_id, peer);
                     peer.set_connection_status(ConnectionStatus::Banned {
                         instant: Instant::now(),
                     });
@@ -625,7 +628,7 @@ impl AllPeers {
                     peer.set_connection_status(ConnectionStatus::Disconnected { instant });
 
                     // update counters
-                    self.banned_peers.remove_banned_peer(peer.known_ip_addresses());
+                    self.banned_peers.remove_banned_peer(peer_id);
                     self.disconnected_peers = self.disconnected_peers.saturating_add(1);
 
                     return PeerAction::Unban(peer.known_ip_addresses().collect());
@@ -777,15 +780,18 @@ impl AllPeers {
         (action, pruned_peers)
     }
 
-    /// Filter peers based on connection status.
+    /// Select the `excess` oldest peers whose status `filter` accepts.
     ///
-    /// This creates a min-heap with the excess number of peers.
-    /// Used by Self::prune_banned_peers and Self::prune_disconnected_peers.
+    /// Used by [`Self::prune_banned_peers`] and [`Self::prune_disconnected_peers`] to age out the
+    /// longest-standing records when a capacity bound is exceeded.
+    ///
+    /// The heap is a max-heap on the instant, so `peek` is the newest selected peer; replacing it
+    /// whenever an older candidate arrives converges the heap on the `excess` oldest.
     fn collect_excess_peers<F>(
         &self,
         excess: usize,
         filter: F,
-    ) -> BinaryHeap<(Reverse<Instant>, PeerId, Vec<IpAddr>)>
+    ) -> BinaryHeap<(Instant, PeerId, Vec<IpAddr>)>
     where
         F: Fn(&ConnectionStatus) -> Option<Instant>,
     {
@@ -794,16 +800,13 @@ impl AllPeers {
 
         for (peer_id, peer) in &self.peers {
             if let Some(instant) = filter(peer.connection_status()) {
-                // min-heap sorted by instant (oldest first)
-                let entry =
-                    (Reverse(instant), *peer_id, peer.known_ip_addresses().collect::<Vec<_>>());
+                let entry = (instant, *peer_id, peer.known_ip_addresses().collect::<Vec<_>>());
 
                 if excess_peers.len() < excess {
                     // fill the heap until `excess` elements
                     excess_peers.push(entry);
-                } else if let Some(current_max) = excess_peers.peek() {
-                    // if peer's banned instant is older, replace it
-                    if entry.0 < current_max.0 {
+                } else if let Some(newest) = excess_peers.peek() {
+                    if entry.0 < newest.0 {
                         excess_peers.pop();
                         excess_peers.push(entry);
                     }
@@ -829,9 +832,9 @@ impl AllPeers {
                 }
             });
 
-            for (_, peer_id, ip_addrs) in excess_peers {
+            for (_, peer_id, _) in excess_peers {
                 self.peers.remove(&peer_id);
-                let ips = self.banned_peers.remove_banned_peer(ip_addrs.clone().into_iter());
+                let ips = self.banned_peers.remove_banned_peer(&peer_id);
                 unbanned.push((peer_id, ips));
             }
         }
