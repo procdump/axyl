@@ -103,21 +103,30 @@ impl AllPeers {
         addrs: Vec<Multiaddr>,
     ) {
         let peer_id: PeerId = network_key.clone().into();
+
+        // Check if this peer is a committee member - only committee members get trusted status
+        let is_committee_member = self.current_committee_keys.contains_key(&bls_public_key);
+        if is_committee_member {
+            // this call is the only place the key-to-peer mapping becomes known for a member the
+            // epoch boundary could not resolve, so record it here or the exemption waits an epoch
+            self.current_committee_keys.insert(bls_public_key, Some(peer_id));
+            self.current_committee.insert(peer_id);
+        }
+
         if let Some(peer) = self.peers.get_mut(&peer_id) {
             debug!(target: "peer-manager", peer=?peer, "peer already exists, overwriting");
             peer.update_net(bls_public_key, network_key, addrs);
-        } else {
-            // Check if this peer is a committee member - only committee members get trusted status
-            let is_committee_member = self.current_committee_keys.contains_key(&bls_public_key);
-            let peer;
+
+            // a committee member that connected before its record arrived was created untrusted
             if is_committee_member {
-                debug!(target: "peer-manager", ?peer_id, "committee member peer does not exist, creating trusted");
-                peer = Peer::new_trusted(bls_public_key, network_key, addrs);
-            } else {
-                debug!(target: "peer-manager", ?peer_id, "peer does not exist, creating new peer");
-                peer = Peer::new(bls_public_key, network_key, addrs);
+                peer.make_trusted();
             }
-            self.peers.insert(peer_id, peer);
+        } else if is_committee_member {
+            debug!(target: "peer-manager", ?peer_id, "committee member peer does not exist, creating trusted");
+            self.peers.insert(peer_id, Peer::new_trusted(bls_public_key, network_key, addrs));
+        } else {
+            debug!(target: "peer-manager", ?peer_id, "peer does not exist, creating new peer");
+            self.peers.insert(peer_id, Peer::new(bls_public_key, network_key, addrs));
         }
     }
 
@@ -246,25 +255,28 @@ impl AllPeers {
     /// Update scores for heartbeat interval.
     ///
     /// Returns any subsequent actions the peer manager should take after the peer's score is
-    /// updated. Peers are possibly unbanned, but penalties are not applied with this method.
-    /// It's impossible for a peer to become banned during heartbeat maintenance.
+    /// updated. Penalties are not applied here: decay moves a score toward zero, so the heartbeat
+    /// can lift a peer out of a ban but never push one into it.
     ///
-    /// See [Self::apply_penalty] for ban logic.
+    /// See [Self::process_penalty] for ban logic.
     fn update_peer_scores(&mut self) -> Vec<(PeerId, PeerAction)> {
-        // filter peers that are eligible to become unbanned
-        let unbanned_peers = self.peers.iter_mut().filter_map(|(id, peer)| {
+        let transitions = self.peers.iter_mut().filter_map(|(id, peer)| {
             let update = peer.heartbeat();
             match update {
-                ReputationUpdate::Unbanned => {
-                    Some(*id)
-                },
-                // filter other results and log error
-                ReputationUpdate::Banned | ReputationUpdate::Disconnect => {
+                ReputationUpdate::Unbanned => Some((*id, NewConnectionStatus::Unbanned)),
+                // a connected peer below the disconnect threshold. Decay alone will not lift it
+                // before the next beat, so shed the connection rather than restating the verdict
+                // every heartbeat for as long as the score stays down.
+                ReputationUpdate::Disconnect => Some((
+                    *id,
+                    NewConnectionStatus::Disconnecting { reason: DisconnectReason::Penalized },
+                )),
+                ReputationUpdate::Banned => {
                     error!(
                         target: "peer-manager",
                         ?update,
                         ?id,
-                        "peer reputation penalized during heartbeat - penalties only expected to decay"
+                        "peer reached the ban threshold during heartbeat - decay cannot lower a score"
                     );
                     None
                 },
@@ -273,11 +285,11 @@ impl AllPeers {
         }).collect::<Vec<_>>();
 
         // update peer connection status and return actions for manager
-        unbanned_peers
-            .iter()
-            .map(|id| {
-                let action = self.update_connection_status(id, NewConnectionStatus::Unbanned);
-                (*id, action)
+        transitions
+            .into_iter()
+            .map(|(id, status)| {
+                let action = self.update_connection_status(&id, status);
+                (id, action)
             })
             .collect()
     }
@@ -870,9 +882,11 @@ impl AllPeers {
     /// associated with the committee node are reset. The advertised
     /// listening addresses are updated and the peer is marked `trusted`
     /// so it won't incur any additional penalties.
+    /// Members whose [`NetworkInfo`] is not yet resolved are passed as `None`. Their keys are still
+    /// recorded, so [`Self::upsert_peer`] recognizes them as soon as discovery resolves the record.
     pub(super) fn new_epoch(
         &mut self,
-        committee: Vec<(BlsPublicKey, NetworkInfo)>,
+        committee: Vec<(BlsPublicKey, Option<NetworkInfo>)>,
     ) -> Vec<(PeerId, PeerAction)> {
         // clear self.current_committee and store the peers as old committee to then produce delta
         // from
@@ -881,7 +895,13 @@ impl AllPeers {
         self.current_committee_keys.clear();
 
         let mut actions = Vec::with_capacity(committee.len());
-        for (bls_key, NetworkInfo { pubkey, multiaddrs: addr, .. }) in committee {
+        for (bls_key, network_info) in committee {
+            let Some(NetworkInfo { pubkey, multiaddrs: addr, .. }) = network_info else {
+                // record the key so a later resolution is recognized within this epoch
+                self.current_committee_keys.insert(bls_key, None);
+                continue;
+            };
+
             let peer_id: PeerId = pubkey.clone().into();
             self.current_committee.insert(peer_id);
             self.current_committee_keys.insert(bls_key, Some(peer_id));
