@@ -4,7 +4,7 @@ use super::{
     all_peers::AllPeers,
     cache::BannedPeerCache,
     score::init_peer_score_config,
-    status::NewConnectionStatus,
+    status::{DisconnectReason, NewConnectionStatus},
     types::{ConnectionDirection, ConnectionType, DialRequest, PeerAction},
     PeerEvent, PeerExchangeMap, Penalty,
 };
@@ -379,7 +379,7 @@ impl PeerManager {
             ?peer_id,
             "checking if peer banned"
         );
-        temp_banned || self.peers.peer_banned(peer_id)
+        temp_banned || self.peers.score_or_ip_banned(peer_id)
     }
 
     #[cfg(test)]
@@ -462,7 +462,7 @@ impl PeerManager {
         self.events.push_back(event);
         let action = self.peers.update_connection_status(
             &peer_id,
-            NewConnectionStatus::Disconnecting { banned: false },
+            NewConnectionStatus::Disconnecting { reason: DisconnectReason::ExcessPeers },
         );
 
         debug!(target: "peer-manager", ?action, "disconnect peer results in:");
@@ -473,14 +473,18 @@ impl PeerManager {
     ///
     /// Returns a boolean if the peer was successfully registered. This is the initial
     /// method to call for registering a new peer through dialing or incoming connections.
+    ///
+    /// A refusal closes the connection: the admission gates share this method's predicate, so a
+    /// peer reaching here banned means the ban landed mid-handshake, and leaving that connection
+    /// open would route application traffic to a peer this manager does not track.
     pub(super) fn register_peer_connection(
         &mut self,
         peer_id: &PeerId,
         connection: ConnectionType,
     ) -> bool {
-        if self.peers.peer_banned(peer_id) {
-            // log error if the peer is banned
+        if self.peer_banned(peer_id) {
             error!(target: "peer-manager", ?peer_id, "connected with banned peer");
+            self.push_event(PeerEvent::DisconnectPeer(*peer_id));
             return false;
         }
 
