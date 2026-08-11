@@ -20,11 +20,6 @@ COPY crates/ ./crates/
 COPY chain-configs/ ./chain-configs/
 COPY rayls-contracts/ ./rayls-contracts/
 
-# The builder image has no `git` and no `.git` directory, so vergen cannot derive
-# the commit itself and reads this variable instead. Never let it expand to the
-# empty string: reth's own build script reads the same variable and slices the
-# first 7 bytes off it, panicking on "". Fall back to an all-zero sha so a build
-# without --build-arg still works (with an obviously-unstamped version).
 ARG VERGEN_GIT_SHA
 ENV VERGEN_GIT_SHA=${VERGEN_GIT_SHA:-0000000000000000000000000000000000000000}
 
@@ -36,7 +31,7 @@ ARG BUILD_FEATURES=""
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=./target \
-    cargo build --bin rayls-network --release ${BUILD_FEATURES:+--features ${BUILD_FEATURES}} \
+    cargo build -p rayls-network --bin rayls-network --release ${BUILD_FEATURES:+--features ${BUILD_FEATURES}} \
     && mv ./target/release/rayls-network /tmp/
 
 # production image
