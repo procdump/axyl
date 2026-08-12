@@ -189,12 +189,21 @@ impl RethEnv {
     }
 
     /// Create a new temp RethEnv using a specified chain spec.
+    ///
+    /// Raises the process descriptor limit first. Each env pins roughly forty descriptors: reth's
+    /// [`StaticFileProvider`] keeps a data and an offsets handle open per segment jar and never
+    /// evicts them, on top of MDBX and RocksDB. The node binary raises the limit before launching,
+    /// but temp envs skip that path, so a test run inherits the OS default (256 on macOS) and
+    /// spends it once a handful run concurrently -- surfacing as `Too many open files` in whichever
+    /// test next opens a jar, rather than in the one that exhausted the descriptors.
     pub async fn new_for_temp_chain<P: AsRef<Path>>(
         chain: Arc<RethChainSpec>,
         db_path: P,
         task_manager: &TaskManager,
         rewards: Option<RewardsCounter>,
     ) -> eyre::Result<Self> {
+        fdlimit::raise_fd_limit()?;
+
         let node_config = NodeConfig {
             datadir: DatadirArgs {
                 datadir: MaybePlatformPath::from(db_path.as_ref().to_path_buf()),
