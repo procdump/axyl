@@ -4,7 +4,6 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap},
     fmt::Debug,
-    marker::PhantomData,
     sync::{
         mpsc::{self, SyncSender},
         Arc,
@@ -12,7 +11,6 @@ use std::{
     time::Duration,
 };
 
-use ouroboros::self_referencing;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use prometheus::{default_registry, register_int_gauge_with_registry, IntGauge, Registry};
 use rayls_infrastructure_types::{
@@ -25,24 +23,6 @@ type StoreTableValueType = (bool, Vec<u8>);
 type StoreTableType = BTreeMap<Vec<u8>, StoreTableValueType>;
 type StoreType = HashMap<&'static str, StoreTableType>;
 
-fn get_with_marked_check<T: Table>(store: &StoreType, key: &T::Key) -> Option<T::Value> {
-    if let Some(table) = store.get(T::NAME) {
-        let key_bytes = encode_key(key);
-        if let Some((removed, val_bytes)) = table.get(&key_bytes) {
-            if !*removed {
-                let val = decode(val_bytes);
-                return Some(val);
-            }
-        }
-    }
-    None
-}
-
-fn mark_value_for_deletion<T: Table>(value: &mut StoreTableValueType) {
-    // mark for actual deletion once tx committed
-    value.0 = true;
-}
-
 #[derive(Debug)]
 pub struct MemDbTx<'a> {
     store: RwLockReadGuard<'a, StoreType>,
@@ -52,10 +32,10 @@ impl<'a> MemDbTx<'a> {
     pub fn get_no_marked_check<T: Table>(&self, key: &T::Key) -> Option<(bool, T::Value)> {
         if let Some(table) = self.store.get(T::NAME) {
             let key_bytes = encode_key(key);
-            return table.get(&key_bytes).map(|(removed, val_bytes)| {
+            if let Some((tombstoned, val_bytes)) = table.get(&key_bytes) {
                 let val = decode(val_bytes);
-                (*removed, val)
-            });
+                return Some((*tombstoned, val));
+            }
         }
         None
     }
@@ -64,7 +44,7 @@ impl<'a> MemDbTx<'a> {
     pub fn is_tombstoned<T: Table>(&self, key: &T::Key) -> bool {
         if let Some(table) = self.store.get(T::NAME) {
             let key_bytes = encode_key(key);
-            return table.get(&key_bytes).map_or(false, |(removed, _)| *removed);
+            return table.get(&key_bytes).map_or(false, |(tombstoned, _)| *tombstoned);
         }
         false
     }
@@ -75,101 +55,51 @@ impl<'a> DbTx for MemDbTx<'a> {
         Ok(get_with_marked_check::<T>(&self.store, key))
     }
 
+    fn contains_key<T: Table>(&self, key: &T::Key) -> eyre::Result<bool> {
+        Ok(contains_key_impl::<T>(&self.store, key))
+    }
+
     fn iter<T: Table>(&self) -> DBIter<'_, T> {
-        if let Some(table) = self.store.get(T::NAME) {
-            let items: Vec<_> = table
-                .iter()
-                .filter(|(_, (removed, _))| !*removed)
-                .map(|(k, (_, v))| (decode_key::<T::Key>(k), decode::<T::Value>(v)))
-                .collect();
-            Box::new(items.into_iter())
-        } else {
-            Box::new(std::iter::empty())
+        match iter_impl::<T>(&self.store) {
+            Some(items) => Box::new(items.into_iter()),
+            None => Box::new(std::iter::empty()),
         }
     }
 
     fn raw_iter<T: Table>(&self) -> DBRawIter<'_> {
-        if let Some(table) = self.store.get(T::NAME) {
-            // The read guard is held by `self`, so we can borrow the stored
-            // bytes for the iterator's lifetime instead of cloning them.
-            Box::new(
-                table
-                    .iter()
-                    .filter(|(_, (removed, _))| !*removed)
-                    .map(|(k, (_, v))| (Cow::Borrowed(k.as_slice()), Cow::Borrowed(v.as_slice()))),
-            )
-        } else {
-            Box::new(std::iter::empty())
+        match raw_iter_borrowed_impl::<T>(&self.store) {
+            Some(iter) => iter,
+            None => Box::new(std::iter::empty()),
         }
     }
 
     fn skip_to<T: Table>(&self, key: &T::Key) -> eyre::Result<DBIter<'_, T>> {
-        if let Some(table) = self.store.get(T::NAME) {
-            let key_bytes = encode_key(key);
-            let items: Vec<_> = table
-                .iter()
-                .filter(|(_, (removed, _))| !*removed)
-                .skip_while(|(k, _)| **k < key_bytes)
-                .map(|(k, (_, v))| (decode_key::<T::Key>(k), decode::<T::Value>(v)))
-                .collect();
-            Ok(Box::new(items.into_iter()))
-        } else {
-            Err(eyre::eyre!("Invalid table {}", T::NAME))
+        match skip_to_impl::<T>(&self.store, key) {
+            Some(items) => Ok(Box::new(items.into_iter())),
+            None => Err(eyre::eyre!("Invalid table {}", T::NAME)),
         }
     }
 
     fn reverse_iter<T: Table>(&self) -> DBIter<'_, T> {
-        if let Some(table) = self.store.get(T::NAME) {
-            let items: Vec<_> = table
-                .iter()
-                .rev()
-                .filter(|(_, (removed, _))| !*removed)
-                .map(|(k, (_, v))| (decode_key::<T::Key>(k), decode::<T::Value>(v)))
-                .collect();
-            Box::new(items.into_iter())
-        } else {
-            Box::new(std::iter::empty())
+        match reverse_iter_impl::<T>(&self.store) {
+            Some(items) => Box::new(items.into_iter()),
+            None => Box::new(std::iter::empty()),
         }
     }
 
     fn reverse_raw_iter<T: Table>(&self) -> DBRawIter<'_> {
-        if let Some(table) = self.store.get(T::NAME) {
-            Box::new(
-                table
-                    .iter()
-                    .rev()
-                    .filter(|(_, (removed, _))| !*removed)
-                    .map(|(k, (_, v))| (Cow::Borrowed(k.as_slice()), Cow::Borrowed(v.as_slice()))),
-            )
-        } else {
-            Box::new(std::iter::empty())
+        match reverse_raw_iter_borrowed_impl::<T>(&self.store) {
+            Some(iter) => iter,
+            None => Box::new(std::iter::empty()),
         }
     }
 
     fn last_record<T: Table>(&self) -> Option<(T::Key, T::Value)> {
-        if let Some(table) = self.store.get(T::NAME) {
-            for (key_bytes, (removed, value_bytes)) in table.iter().rev() {
-                if !*removed {
-                    return Some((decode_key(key_bytes), decode(value_bytes)));
-                }
-            }
-            None
-        } else {
-            None
-        }
+        last_record_impl::<T>(&self.store)
     }
 
     fn record_prior_to<T: Table>(&self, key: &T::Key) -> Option<(T::Key, T::Value)> {
-        if let Some(table) = self.store.get(T::NAME) {
-            let key_bytes = encode_key(key);
-            table
-                .range(..key_bytes)
-                .rev()
-                .find(|(_, (removed, _))| !*removed)
-                .map(|(k, (_, v))| (decode_key(k), decode(v)))
-        } else {
-            None
-        }
+        record_prior_to_impl::<T>(&self.store, key)
     }
 
     fn disable_long_read_safety(&self) {}
@@ -180,10 +110,32 @@ pub struct MemDbTxMut<'a> {
     store: RwLockWriteGuard<'a, StoreType>,
 }
 
+impl<'a> MemDbTxMut<'a> {
+    fn mark_value_for_deletion(value: &mut StoreTableValueType) {
+        // mark for actual deletion once tx committed
+        value.0 = true;
+    }
+
+    /// Hard-removes `key` from the in-memory store, leaving no tombstone.
+    ///
+    /// Persistent eviction archives a row permanently (never re-inserted), so the cache entry is
+    /// dropped outright rather than tombstoned: this frees the cache and lets reads fall through to
+    /// a lower tier, whereas a tombstone would shadow it and never be reclaimed.
+    pub fn hard_delete<T: Table>(&mut self, key: &T::Key) {
+        if let Some(table) = self.store.get_mut(T::NAME) {
+            table.remove(&encode_key(key));
+        }
+    }
+}
+
 impl<'a> DbTx for MemDbTxMut<'a> {
     fn get<T: Table>(&self, key: &T::Key) -> eyre::Result<Option<T::Value>> {
         //if not in cache check store
         Ok(get_with_marked_check::<T>(&self.store, key))
+    }
+
+    fn contains_key<T: Table>(&self, key: &T::Key) -> eyre::Result<bool> {
+        Ok(contains_key_impl::<T>(&self.store, key))
     }
 
     fn iter<T: Table>(&self) -> DBIter<'_, T> {
@@ -209,72 +161,32 @@ impl<'a> DbTx for MemDbTxMut<'a> {
     }
 
     fn skip_to<T: Table>(&self, key: &T::Key) -> eyre::Result<DBIter<'_, T>> {
-        if let Some(table) = self.store.get(T::NAME) {
-            let key_bytes = encode_key(key);
-            let items: Vec<_> = table
-                .iter()
-                .filter(|(_, (removed, _))| !*removed)
-                .skip_while(|(k, _)| **k < key_bytes)
-                .map(|(k, (_, v))| (decode_key::<T::Key>(k), decode::<T::Value>(v)))
-                .collect();
-            Ok(Box::new(items.into_iter()))
-        } else {
-            Err(eyre::eyre!("Invalid table {}", T::NAME))
+        match skip_to_impl::<T>(&self.store, key) {
+            Some(items) => Ok(Box::new(items.into_iter())),
+            None => Err(eyre::eyre!("Invalid table {}", T::NAME)),
         }
     }
 
     fn reverse_iter<T: Table>(&self) -> DBIter<'_, T> {
-        if let Some(table) = self.store.get(T::NAME) {
-            let items: Vec<_> = table
-                .iter()
-                .rev()
-                .filter(|(_, (removed, _))| !*removed)
-                .map(|(k, (_, v))| (decode_key::<T::Key>(k), decode::<T::Value>(v)))
-                .collect();
-            Box::new(items.into_iter())
-        } else {
-            Box::new(std::iter::empty())
+        match reverse_iter_impl::<T>(&self.store) {
+            Some(items) => Box::new(items.into_iter()),
+            None => Box::new(std::iter::empty()),
         }
     }
 
     fn reverse_raw_iter<T: Table>(&self) -> DBRawIter<'_> {
-        if let Some(table) = self.store.get(T::NAME) {
-            Box::new(
-                table
-                    .iter()
-                    .rev()
-                    .filter(|(_, (removed, _))| !*removed)
-                    .map(|(k, (_, v))| (Cow::Borrowed(k.as_slice()), Cow::Borrowed(v.as_slice()))),
-            )
-        } else {
-            Box::new(std::iter::empty())
+        match reverse_raw_iter_borrowed_impl::<T>(&self.store) {
+            Some(iter) => iter,
+            None => Box::new(std::iter::empty()),
         }
     }
 
     fn last_record<T: Table>(&self) -> Option<(T::Key, T::Value)> {
-        if let Some(table) = self.store.get(T::NAME) {
-            for (key_bytes, (removed, value_bytes)) in table.iter().rev() {
-                if !*removed {
-                    return Some((decode_key(key_bytes), decode(value_bytes)));
-                }
-            }
-            None
-        } else {
-            None
-        }
+        last_record_impl::<T>(&self.store)
     }
 
     fn record_prior_to<T: Table>(&self, key: &T::Key) -> Option<(T::Key, T::Value)> {
-        if let Some(table) = self.store.get(T::NAME) {
-            let key_bytes = encode_key(key);
-            table
-                .range(..key_bytes)
-                .rev()
-                .find(|(_, (removed, _))| !*removed)
-                .map(|(k, (_, v))| (decode_key(k), decode(v)))
-        } else {
-            None
-        }
+        record_prior_to_impl::<T>(&self.store, key)
     }
 
     fn disable_long_read_safety(&self) {}
@@ -285,7 +197,7 @@ impl<'a> DbTxMut for MemDbTxMut<'a> {
         if let Some(table) = self.store.get_mut(T::NAME) {
             let key_bytes = encode_key(key);
             let value_bytes = encode(value);
-            table.insert(key_bytes.clone(), (false, value_bytes));
+            table.insert(key_bytes, (false, value_bytes));
 
             Ok(())
         } else {
@@ -297,7 +209,7 @@ impl<'a> DbTxMut for MemDbTxMut<'a> {
         if let Some(table) = self.store.get_mut(T::NAME) {
             let key_bytes = encode_key(key);
             if let Some(value) = table.get_mut(&key_bytes) {
-                mark_value_for_deletion::<T>(value);
+                Self::mark_value_for_deletion(value);
             } else {
                 // tombstone for keys that only exist in the persistent layer
                 table.insert(key_bytes, (true, Vec::new()));
@@ -311,7 +223,7 @@ impl<'a> DbTxMut for MemDbTxMut<'a> {
     fn clear_table<T: Table>(&mut self) -> eyre::Result<()> {
         if let Some(table) = self.store.get_mut(T::NAME) {
             for value in table.values_mut() {
-                mark_value_for_deletion::<T>(value);
+                Self::mark_value_for_deletion(value);
             }
             Ok(())
         } else {
@@ -322,19 +234,6 @@ impl<'a> DbTxMut for MemDbTxMut<'a> {
     fn commit(self) -> eyre::Result<()> {
         // no need to do anything, the lock finishes with the tx drop
         Ok(())
-    }
-}
-
-impl<'a> MemDbTxMut<'a> {
-    /// Hard-removes `key` from the in-memory store, leaving no tombstone.
-    ///
-    /// Persistent eviction archives a row permanently (never re-inserted), so the cache entry is
-    /// dropped outright rather than tombstoned: this frees the cache and lets reads fall through to
-    /// a lower tier, whereas a tombstone would shadow it and never be reclaimed.
-    pub fn hard_delete<T: Table>(&mut self, key: &T::Key) {
-        if let Some(table) = self.store.get_mut(T::NAME) {
-            table.remove(&encode_key(key));
-        }
     }
 }
 
@@ -350,69 +249,6 @@ pub struct MemDatabase {
 }
 
 impl MemDatabase {
-    // gets the value with the marking for delete flag
-    pub fn get_marked<T: Table>(&self, key: &T::Key) -> eyre::Result<Option<(bool, T::Value)>> {
-        if let Some(table) = self.store.read().get(T::NAME) {
-            let key_bytes = encode_key(key);
-            if let Some((removed, val_bytes)) = table.get(&key_bytes) {
-                let val = decode(val_bytes);
-                return Ok(Some((*removed, val)));
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Check if a key is tombstoned (marked for deletion) without deserializing the value.
-    pub fn is_tombstoned<T: Table>(&self, key: &T::Key) -> bool {
-        if let Some(table) = self.store.read().get(T::NAME) {
-            let key_bytes = encode_key(key);
-            return table.get(&key_bytes).map_or(false, |(removed, _)| *removed);
-        }
-        false
-    }
-
-    pub fn delete_removed<T: Table>(&self, key: &T::Key, require_marked: bool) -> eyre::Result<()> {
-        if let Some(table) = self.store.write().get_mut(T::NAME) {
-            let key_bytes = encode_key(key);
-            if let Some((removed, _)) = table.get(&key_bytes) {
-                if !*removed && require_marked {
-                    // Value was re-inserted after the remove was queued — keep it.
-                    return Ok(());
-                }
-
-                table.remove(&key_bytes);
-            }
-        }
-        Ok(())
-    }
-
-    /// Returns keys marked for deletion in the given table.
-    pub fn get_deleted_keys<T: Table>(&self) -> std::collections::HashSet<Vec<u8>> {
-        if let Some(table) = self.store.read().get(T::NAME) {
-            table.iter().filter(|(_, (removed, _))| *removed).map(|(k, _)| k.clone()).collect()
-        } else {
-            std::collections::HashSet::new()
-        }
-    }
-}
-
-impl Drop for MemDatabase {
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.shutdown_tx) <= 1 {
-            tracing::info!(target: "rayls::memdb", "MemDatabase Dropping, shutting down metrics thread");
-            // shutdown_tx is a sync sender with no buffer so this should block until the thread
-            // reads it and shuts down.
-            if let Err(e) = self.shutdown_tx.send(()) {
-                tracing::error!(target: "rayls::memdb",
-                    "Error while trying to send shutdown to MemDatabase metrics thread {e}"
-                );
-            }
-        }
-    }
-}
-
-impl MemDatabase {
     pub fn new() -> Self {
         let store: Arc<RwLock<StoreType>> = Arc::new(RwLock::new(HashMap::new()));
         let metrics = Arc::new(RwLock::new(MemDBMetrics::default()));
@@ -420,6 +256,7 @@ impl MemDatabase {
 
         let store_cloned: Arc<RwLock<StoreType>> = Arc::clone(&store);
         let metrics_cloned = metrics.clone();
+
         // Spawn thread to update metrics from MemDB stats every 30 seconds.
         std::thread::spawn(move || {
             tracing::info!(target: "rayls::memdb", "Starting MemDB metrics thread");
@@ -437,6 +274,70 @@ impl MemDatabase {
         });
 
         Self { store, metrics, shutdown_tx: Arc::new(shutdown_tx) }
+    }
+
+    /// Infallible read transaction; [`Database::read_txn`] wraps this.
+    fn read_txn_impl(&self) -> MemDbTx<'_> {
+        MemDbTx { store: self.store.read() }
+    }
+
+    /// Infallible write transaction; [`Database::write_txn`] wraps this.
+    fn write_txn_impl(&self) -> MemDbTxMut<'_> {
+        MemDbTxMut { store: self.store.write() }
+    }
+
+    // gets the value with the marking for delete flag
+    pub fn get_marked<T: Table>(&self, key: &T::Key) -> eyre::Result<Option<(bool, T::Value)>> {
+        Ok(self.read_txn_impl().get_no_marked_check::<T>(key))
+    }
+
+    /// Check if a key is tombstoned (marked for deletion) without deserializing the value.
+    pub fn is_tombstoned<T: Table>(&self, key: &T::Key) -> bool {
+        self.read_txn_impl().is_tombstoned::<T>(key)
+    }
+
+    pub fn delete_tombstoned<T: Table>(
+        &self,
+        key: &T::Key,
+        require_marked: bool,
+    ) -> eyre::Result<()> {
+        if let Some(table) = self.store.write().get_mut(T::NAME) {
+            let key_bytes = encode_key(key);
+            if let Some((tombstoned, _)) = table.get(&key_bytes) {
+                if *tombstoned || !require_marked {
+                    table.remove(&key_bytes);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns keys marked for deletion in the given table.
+    pub fn get_deleted_keys<T: Table>(&self) -> std::collections::HashSet<Vec<u8>> {
+        if let Some(table) = self.store.read().get(T::NAME) {
+            table
+                .iter()
+                .filter(|(_, (tombstoned, _))| *tombstoned)
+                .map(|(k, _)| k.clone())
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        }
+    }
+}
+
+impl Drop for MemDatabase {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.shutdown_tx) > 1 {
+            return;
+        }
+
+        tracing::info!(target: "rayls::memdb", "MemDatabase Dropping, shutting down metrics thread");
+        // shutdown_tx is a sync sender with no buffer so this should block until the thread
+        // reads it and shuts down.
+        if let Err(e) = self.shutdown_tx.send(()) {
+            tracing::error!(target: "rayls::memdb", "Error while trying to send shutdown to MemDatabase metrics thread {e}");
+        }
     }
 }
 
@@ -482,173 +383,83 @@ impl Database for MemDatabase {
     }
 
     fn read_txn(&self) -> eyre::Result<Self::TX<'_>> {
-        Ok(MemDbTx { store: self.store.read() })
+        Ok(self.read_txn_impl())
     }
 
     fn write_txn(&self) -> eyre::Result<MemDbTxMut<'_>> {
-        Ok(MemDbTxMut { store: self.store.write() })
+        Ok(self.write_txn_impl())
     }
 
     fn contains_key<T: Table>(&self, key: &T::Key) -> eyre::Result<bool> {
-        if let Some(table) = self.store.read().get(T::NAME) {
-            let key_bytes = encode_key(key);
-            if let Some((removed, _)) = table.get(&key_bytes) {
-                return Ok(!*removed);
-            }
-        }
-        Ok(false)
+        self.read_txn_impl().contains_key::<T>(key)
     }
 
     fn get<T: Table>(&self, key: &T::Key) -> eyre::Result<Option<T::Value>> {
-        Ok(get_with_marked_check::<T>(&self.store.read(), key))
+        self.read_txn_impl().get::<T>(key)
     }
 
     fn insert<T: Table>(&self, key: &T::Key, value: &T::Value) -> eyre::Result<()> {
-        if let Some(table) = self.store.write().get_mut(T::NAME) {
-            let key_bytes = encode_key(key);
-            let value_bytes = encode(value);
-            table.insert(key_bytes, (false, value_bytes));
-        }
-        Ok(())
+        self.write_txn_impl().insert::<T>(key, value)
     }
 
     fn remove<T: Table>(&self, key: &T::Key) -> eyre::Result<()> {
-        if let Some(table) = self.store.write().get_mut(T::NAME) {
-            let key_bytes = encode_key(key);
-            if let Some(value) = table.get_mut(&key_bytes) {
-                mark_value_for_deletion::<T>(value);
-            } else {
-                // tombstone for keys that only exist in the persistent layer
-                table.insert(key_bytes, (true, Vec::new()));
-            }
-        }
-        Ok(())
+        self.write_txn_impl().remove::<T>(key)
     }
 
     fn clear_table<T: Table>(&self) -> eyre::Result<()> {
-        if let Some(table) = self.store.write().get_mut(T::NAME) {
-            //mark all for deletion
-            for value in table.values_mut() {
-                mark_value_for_deletion::<T>(value);
-            }
-        }
-        Ok(())
+        self.write_txn_impl().clear_table::<T>()
     }
 
     fn is_empty<T: Table>(&self) -> bool {
-        if let Some(table) = self.store.read().get(T::NAME) {
-            // iterate table values and see if any are not marked for deletion
-            let guard = table;
-            for (removed, _) in guard.values() {
-                if !*removed {
-                    return false;
-                }
-            }
-
-            true
-        } else {
-            true
-        }
+        self.store
+            .read()
+            .get(T::NAME)
+            .map_or(true, |table| table.values().all(|(tombstoned, _)| *tombstoned))
     }
 
     fn iter<T: Table>(&self) -> DBIter<'_, T> {
-        if let Some(table) = self.store.read().get(T::NAME) {
-            let items: Vec<_> = table
-                .iter()
-                .filter(|(_, (removed, _))| !*removed)
-                .map(|(k, (_, v))| (decode_key::<T::Key>(k), decode::<T::Value>(v)))
-                .collect();
-            Box::new(items.into_iter())
-        } else {
-            panic!("Invalid table {}", T::NAME);
+        match iter_impl::<T>(&self.store.read()) {
+            Some(items) => Box::new(items.into_iter()),
+            None => panic!("Invalid table {}", T::NAME),
         }
     }
 
     fn raw_iter<T: Table>(&self) -> DBRawIter<'_> {
         // The guard is a temporary here (not held by `self`), so the bytes must
         // be owned rather than borrowed for the iterator's lifetime.
-        if let Some(table) = self.store.read().get(T::NAME) {
-            let items: Vec<(Cow<'_, [u8]>, Cow<'_, [u8]>)> = table
-                .iter()
-                .filter(|(_, (removed, _))| !*removed)
-                .map(|(k, (_, v))| (Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-                .collect();
-            Box::new(items.into_iter())
-        } else {
-            panic!("Invalid table {}", T::NAME);
+        match raw_iter_owned_impl::<T>(&self.store.read()) {
+            Some(items) => Box::new(items.into_iter()),
+            None => panic!("Invalid table {}", T::NAME),
         }
     }
 
     fn skip_to<T: Table>(&self, key: &T::Key) -> eyre::Result<DBIter<'_, T>> {
-        if let Some(table) = self.store.read().get(T::NAME) {
-            let key_bytes = encode_key(key);
-            let items: Vec<_> = table
-                .iter()
-                .filter(|(_, (removed, _))| !*removed)
-                .skip_while(|(k, _)| **k < key_bytes)
-                .map(|(k, (_, v))| (decode_key::<T::Key>(k), decode::<T::Value>(v)))
-                .collect();
-            Ok(Box::new(items.into_iter()))
-        } else {
-            Err(eyre::eyre!("Invalid table {}", T::NAME))
+        match skip_to_impl::<T>(&self.store.read(), key) {
+            Some(items) => Ok(Box::new(items.into_iter())),
+            None => Err(eyre::eyre!("Invalid table {}", T::NAME)),
         }
     }
 
     fn reverse_iter<T: Table>(&self) -> DBIter<'_, T> {
-        if let Some(table) = self.store.read().get(T::NAME) {
-            let items: Vec<_> = table
-                .iter()
-                .rev()
-                .filter(|(_, (removed, _))| !*removed)
-                .map(|(k, (_, v))| (decode_key::<T::Key>(k), decode::<T::Value>(v)))
-                .collect();
-            Box::new(items.into_iter())
-        } else {
-            panic!("Invalid table {}", T::NAME);
+        match reverse_iter_impl::<T>(&self.store.read()) {
+            Some(items) => Box::new(items.into_iter()),
+            None => panic!("Invalid table {}", T::NAME),
         }
     }
 
     fn reverse_raw_iter<T: Table>(&self) -> DBRawIter<'_> {
-        if let Some(table) = self.store.read().get(T::NAME) {
-            let items: Vec<(Cow<'_, [u8]>, Cow<'_, [u8]>)> = table
-                .iter()
-                .rev()
-                .filter(|(_, (removed, _))| !*removed)
-                .map(|(k, (_, v))| (Cow::Owned(k.clone()), Cow::Owned(v.clone())))
-                .collect();
-            Box::new(items.into_iter())
-        } else {
-            panic!("Invalid table {}", T::NAME);
-        }
-    }
-
-    fn record_prior_to<T: Table>(&self, key: &T::Key) -> Option<(T::Key, T::Value)> {
-        if let Some(table) = self.store.read().get(T::NAME) {
-            let key_bytes = encode_key(key);
-            table
-                .range(..key_bytes)
-                .rev()
-                .find(|(_, v)| !v.0)
-                .map(|(k, v)| (decode_key(k), decode(&v.1)))
-        } else {
-            None
+        match reverse_raw_iter_owned_impl::<T>(&self.store.read()) {
+            Some(items) => Box::new(items.into_iter()),
+            None => panic!("Invalid table {}", T::NAME),
         }
     }
 
     fn last_record<T: Table>(&self) -> Option<(T::Key, T::Value)> {
-        if let Some(table) = self.store.read().get(T::NAME) {
-            //redo with reverse iter
-            for (key_bytes, marked_value_bytes) in table.iter().rev() {
-                if marked_value_bytes.0 == false {
-                    let key = decode_key(key_bytes);
-                    let value = decode(&marked_value_bytes.1);
-                    return Some((key, value));
-                }
-            }
-            None
-        } else {
-            None
-        }
+        self.read_txn_impl().last_record::<T>()
+    }
+
+    fn record_prior_to<T: Table>(&self, key: &T::Key) -> Option<(T::Key, T::Value)> {
+        self.read_txn_impl().record_prior_to::<T>(key)
     }
 
     /// Execute a write operation with automatic commit/abort.
@@ -660,44 +471,6 @@ impl Database for MemDatabase {
         let result = f(&mut tx)?;
         tx.commit()?;
         Ok(result)
-    }
-}
-
-#[self_referencing]
-struct TabAndGuard<T>
-where
-    T: Table,
-{
-    casper: PhantomData<T>,
-    table: Arc<BTreeMap<Vec<u8>, Vec<u8>>>,
-    #[borrows(table)]
-    #[covariant]
-    guard: RwLockReadGuard<'this, BTreeMap<Vec<u8>, Vec<u8>>>,
-}
-
-#[self_referencing]
-pub struct MemDBIter<T>
-where
-    T: Table,
-{
-    casper: PhantomData<T>,
-    table: TabAndGuard<T>,
-    #[borrows(table)]
-    #[not_covariant]
-    iter: Box<dyn Iterator<Item = (&'this Vec<u8>, &'this Vec<u8>)> + 'this>,
-}
-
-impl<T: Table> Iterator for MemDBIter<T> {
-    type Item = (T::Key, T::Value);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.with_mut(|fields| {
-            fields.iter.next().map(|(key_bytes, value_bytes)| {
-                let key = decode_key(key_bytes);
-                let value = decode(value_bytes);
-                (key, value)
-            })
-        })
     }
 }
 
@@ -730,6 +503,117 @@ impl Default for MemDBMetrics {
             }
         }
     }
+}
+
+fn get_with_marked_check<T: Table>(store: &StoreType, key: &T::Key) -> Option<T::Value> {
+    if let Some(table) = store.get(T::NAME) {
+        let key_bytes = encode_key(key);
+        if let Some((tombstoned, val_bytes)) = table.get(&key_bytes) {
+            if !*tombstoned {
+                let val = decode(val_bytes);
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
+fn contains_key_impl<T: Table>(store: &StoreType, key: &T::Key) -> bool {
+    if let Some(table) = store.get(T::NAME) {
+        let key_bytes = encode_key(key);
+        if let Some((tombstoned, _)) = table.get(&key_bytes) {
+            return !*tombstoned;
+        }
+    }
+    false
+}
+
+fn collect_typed<'t, T: Table, I>(iter: I) -> Vec<(T::Key, T::Value)>
+where
+    I: Iterator<Item = (&'t Vec<u8>, &'t (bool, Vec<u8>))>,
+{
+    iter.filter(|(_, (tombstoned, _))| !*tombstoned)
+        .map(|(k, (_, v))| (decode_key::<T::Key>(k), decode::<T::Value>(v)))
+        .collect()
+}
+
+fn collect_raw_borrowed<'t, I>(iter: I) -> DBRawIter<'t>
+where
+    I: Iterator<Item = (&'t Vec<u8>, &'t (bool, Vec<u8>))> + 't,
+{
+    Box::new(
+        iter.filter(|(_, (tombstoned, _))| !*tombstoned)
+            .map(|(k, (_, v))| (Cow::Borrowed(k.as_slice()), Cow::Borrowed(v.as_slice()))),
+    )
+}
+
+fn collect_raw_owned<'t, I>(iter: I) -> Vec<(Cow<'static, [u8]>, Cow<'static, [u8]>)>
+where
+    I: Iterator<Item = (&'t Vec<u8>, &'t (bool, Vec<u8>))>,
+{
+    iter.filter(|(_, (tombstoned, _))| !*tombstoned)
+        .map(|(k, (_, v))| (Cow::Owned(k.clone()), Cow::Owned(v.clone())))
+        .collect()
+}
+
+fn iter_impl<T: Table>(store: &StoreType) -> Option<Vec<(T::Key, T::Value)>> {
+    let table = store.get(T::NAME)?;
+    Some(collect_typed::<T, _>(table.iter()))
+}
+
+fn raw_iter_borrowed_impl<T: Table>(store: &StoreType) -> Option<DBRawIter<'_>> {
+    let table = store.get(T::NAME)?;
+    Some(collect_raw_borrowed(table.iter()))
+}
+
+fn raw_iter_owned_impl<T: Table>(
+    store: &StoreType,
+) -> Option<Vec<(Cow<'static, [u8]>, Cow<'static, [u8]>)>> {
+    let table = store.get(T::NAME)?;
+    Some(collect_raw_owned(table.iter()))
+}
+
+fn skip_to_impl<T: Table>(store: &StoreType, key: &T::Key) -> Option<Vec<(T::Key, T::Value)>> {
+    let table = store.get(T::NAME)?;
+    let key_bytes = encode_key(key);
+    Some(collect_typed::<T, _>(table.iter().skip_while(|(k, _)| **k < key_bytes)))
+}
+
+fn reverse_iter_impl<T: Table>(store: &StoreType) -> Option<Vec<(T::Key, T::Value)>> {
+    let table = store.get(T::NAME)?;
+    Some(collect_typed::<T, _>(table.iter().rev()))
+}
+
+fn reverse_raw_iter_borrowed_impl<T: Table>(store: &StoreType) -> Option<DBRawIter<'_>> {
+    let table = store.get(T::NAME)?;
+    Some(collect_raw_borrowed(table.iter().rev()))
+}
+
+fn reverse_raw_iter_owned_impl<T: Table>(
+    store: &StoreType,
+) -> Option<Vec<(Cow<'static, [u8]>, Cow<'static, [u8]>)>> {
+    let table = store.get(T::NAME)?;
+    Some(collect_raw_owned(table.iter().rev()))
+}
+
+fn last_record_impl<T: Table>(store: &StoreType) -> Option<(T::Key, T::Value)> {
+    let table = store.get(T::NAME)?;
+    for (key_bytes, (tombstoned, value_bytes)) in table.iter().rev() {
+        if !*tombstoned {
+            return Some((decode_key(key_bytes), decode(value_bytes)));
+        }
+    }
+    None
+}
+
+fn record_prior_to_impl<T: Table>(store: &StoreType, key: &T::Key) -> Option<(T::Key, T::Value)> {
+    let table = store.get(T::NAME)?;
+    let key_bytes = encode_key(key);
+    table
+        .range(..key_bytes)
+        .rev()
+        .find(|(_, (tombstoned, _))| !*tombstoned)
+        .map(|(k, (_, v))| (decode_key(k), decode(v)))
 }
 
 #[cfg(test)]
