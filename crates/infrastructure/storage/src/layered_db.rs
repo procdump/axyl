@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     cmp::Ordering,
+    collections::BinaryHeap,
     fmt::Debug,
     future::Future,
     iter::Peekable,
@@ -20,10 +21,10 @@ use crate::{
     tables::ColdBatchLocations,
 };
 
-use crate::mem_db::{MemDatabase, MemDbTx, MemDbTxMut};
+use crate::mem_db::{EvictionHeap, EvictionStats, MemDatabase, MemDbTx, MemDbTxMut};
 use prometheus::{default_registry, register_int_gauge_with_registry, IntGauge, Registry};
 use rayls_infrastructure_types::{
-    decode_key, encode, DBIter, DBRawIter, Database, DbTx, DbTxMut, Table,
+    decode_key, encode, encode_key, DBIter, DBRawIter, Database, DbTx, DbTxMut, Table,
 };
 use tokio::sync::oneshot::{self, error::TryRecvError};
 
@@ -231,8 +232,22 @@ fn merge_cold_raw<'i, T: Table>(
     Box::new(merged.take_while(move |_| !faulted.get()))
 }
 
-const CACHE_KEEP_TIME_SECS: u64 = 60;
-const MAX_CACHE_SIZE: usize = 10000;
+/// Default cap on total cached rows (live and tombstoned) before the writer evicts settled keys.
+const DEFAULT_MAX_CACHE_SIZE: usize = 10000;
+
+/// Eviction policy for the mem cache.
+#[derive(Clone, Copy, Debug)]
+pub struct CacheConfig {
+    /// Total cached rows (live and tombstoned) allowed before the writer evicts settled keys
+    /// (in-flight == 0) in recency order. Small in tests, the default in production.
+    pub max_size: usize,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self { max_size: DEFAULT_MAX_CACHE_SIZE }
+    }
+}
 
 pub struct LayeredDbTx<'a, DB: Database> {
     mem_db: MemDbTx<'a>,
@@ -290,10 +305,13 @@ impl<'a, DB: Database> LayeredDbTx<'a, DB> {
     /// (`record_prior_to`), so a deep floor never pays for the rows above it.
     pub fn reverse_skip_to<T: Table>(&self, key: &T::Key) -> eyre::Result<DBIter<'_, T>> {
         let db = &self.db;
-        let db_first = db
-            .get::<T>(key)?
-            .map(|value| (key.clone(), value))
-            .or_else(|| db.record_prior_to::<T>(key));
+        let db_first = if self.mem_db.is_clearing::<T>() {
+            None
+        } else {
+            db.get::<T>(key)?
+                .map(|value| (key.clone(), value))
+                .or_else(|| db.record_prior_to::<T>(key))
+        };
         let db_iter: DBIter<'_, T> =
             Box::new(std::iter::successors(db_first, move |(k, _)| db.record_prior_to::<T>(k)));
 
@@ -374,6 +392,9 @@ impl<'a, DB: Database> DbTx for LayeredDbTx<'a, DB> {
             None
         } else if let Some((_, val)) = self.mem_db.get_no_marked_check::<T>(key) {
             Some(val)
+        } else if self.mem_db.is_clearing::<T>() {
+            // Pending clear: keys not live in the cache are gone, not stale.
+            None
         } else {
             self.db.get::<T>(key)?
         };
@@ -393,6 +414,9 @@ impl<'a, DB: Database> DbTx for LayeredDbTx<'a, DB> {
         if let Some((_, val)) = self.mem_db.get_no_marked_check::<T>(key) {
             return Ok(Some(Cow::Owned(encode(&val))));
         }
+        if self.mem_db.is_clearing::<T>() {
+            return self.cold_raw_get::<T>(key);
+        }
         match self.db.raw_get::<T>(key)? {
             Some(bytes) => Ok(Some(bytes)),
             None => self.cold_raw_get::<T>(key),
@@ -400,7 +424,11 @@ impl<'a, DB: Database> DbTx for LayeredDbTx<'a, DB> {
     }
 
     fn iter<T: Table>(&self) -> DBIter<'_, T> {
-        let db_iter = self.db.iter::<T>();
+        let db_iter = if self.mem_db.is_clearing::<T>() {
+            Box::new(std::iter::empty())
+        } else {
+            self.db.iter::<T>()
+        };
         let mem_iter = self.mem_db.iter::<T>();
         let is_tombstoned: Box<dyn Fn(&T::Key) -> bool + '_> =
             Box::new(|k| self.mem_db.is_tombstoned::<T>(k));
@@ -410,7 +438,11 @@ impl<'a, DB: Database> DbTx for LayeredDbTx<'a, DB> {
     }
 
     fn raw_iter<T: Table>(&self) -> DBRawIter<'_> {
-        let db_iter = self.db.raw_iter::<T>();
+        let db_iter = if self.mem_db.is_clearing::<T>() {
+            Box::new(std::iter::empty())
+        } else {
+            self.db.raw_iter::<T>()
+        };
         let mem_iter = self.mem_db.raw_iter::<T>();
         let is_tombstoned: Box<dyn Fn(&T::Key) -> bool + '_> =
             Box::new(|k| self.mem_db.is_tombstoned::<T>(k));
@@ -420,7 +452,11 @@ impl<'a, DB: Database> DbTx for LayeredDbTx<'a, DB> {
     }
 
     fn skip_to<T: Table>(&self, key: &T::Key) -> eyre::Result<DBIter<'_, T>> {
-        let db_iter = self.db.skip_to::<T>(key)?;
+        let db_iter = if self.mem_db.is_clearing::<T>() {
+            Box::new(std::iter::empty())
+        } else {
+            self.db.skip_to::<T>(key)?
+        };
         let mem_iter = self.mem_db.skip_to::<T>(key)?;
         let is_tombstoned: Box<dyn Fn(&T::Key) -> bool + '_> =
             Box::new(|k| self.mem_db.is_tombstoned::<T>(k));
@@ -430,7 +466,11 @@ impl<'a, DB: Database> DbTx for LayeredDbTx<'a, DB> {
     }
 
     fn raw_skip_to<T: Table>(&self, key: &T::Key) -> eyre::Result<DBRawIter<'_>> {
-        let db_iter = self.db.raw_skip_to::<T>(key)?;
+        let db_iter = if self.mem_db.is_clearing::<T>() {
+            Box::new(std::iter::empty())
+        } else {
+            self.db.raw_skip_to::<T>(key)?
+        };
         let mem_iter = self.mem_db.raw_skip_to::<T>(key)?;
         let is_tombstoned: Box<dyn Fn(&T::Key) -> bool + '_> =
             Box::new(|k| self.mem_db.is_tombstoned::<T>(k));
@@ -440,7 +480,11 @@ impl<'a, DB: Database> DbTx for LayeredDbTx<'a, DB> {
     }
 
     fn reverse_iter<T: Table>(&self) -> DBIter<'_, T> {
-        let db_iter = self.db.reverse_iter::<T>();
+        let db_iter = if self.mem_db.is_clearing::<T>() {
+            Box::new(std::iter::empty())
+        } else {
+            self.db.reverse_iter::<T>()
+        };
         let mem_iter = self.mem_db.reverse_iter::<T>();
         let is_tombstoned: Box<dyn Fn(&T::Key) -> bool + '_> =
             Box::new(|k| self.mem_db.is_tombstoned::<T>(k));
@@ -450,7 +494,11 @@ impl<'a, DB: Database> DbTx for LayeredDbTx<'a, DB> {
     }
 
     fn reverse_raw_iter<T: Table>(&self) -> DBRawIter<'_> {
-        let db_iter = self.db.reverse_raw_iter::<T>();
+        let db_iter = if self.mem_db.is_clearing::<T>() {
+            Box::new(std::iter::empty())
+        } else {
+            self.db.reverse_raw_iter::<T>()
+        };
         let mem_iter = self.mem_db.reverse_raw_iter::<T>();
         let is_tombstoned: Box<dyn Fn(&T::Key) -> bool + '_> =
             Box::new(|k| self.mem_db.is_tombstoned::<T>(k));
@@ -534,6 +582,9 @@ impl<'a, DB: Database> DbTx for LayeredDbTxMut<'a, DB> {
 
 impl<'a, DB: Database> DbTxMut for LayeredDbTxMut<'a, DB> {
     fn insert<T: Table>(&mut self, key: &T::Key, value: &T::Value) -> eyre::Result<()> {
+        // The txn producer already holds the mem write guard for its whole lifetime, so the
+        // mutation, the in-flight increment and the enqueue are one critical section by
+        // construction.
         self.mem_db.insert::<T>(key, value)?;
         let ins = Box::new(KeyValueInsert::<T> { key: key.clone(), value: value.clone() });
         self.tx.send(DBMessage::Insert(ins)).map_err(|_| eyre::eyre!("DB thread gone, FATAL!"))?;
@@ -562,8 +613,9 @@ impl<'a, DB: Database> DbTxMut for LayeredDbTxMut<'a, DB> {
     }
 
     fn clear_table<T: Table>(&mut self) -> eyre::Result<()> {
+        let keys = self.mem_db.raw_keys::<T>();
         self.mem_db.clear_table::<T>()?;
-        let clr = Box::new(ClearTable::<T> { _casper: PhantomData });
+        let clr = Box::new(ClearTable::<T> { _marker: PhantomData, keys });
         self.tx.send(DBMessage::Clear(clr)).map_err(|_| eyre::eyre!("DB thread gone, FATAL!"))?;
         Ok(())
     }
@@ -575,26 +627,22 @@ impl<'a, DB: Database> DbTxMut for LayeredDbTxMut<'a, DB> {
     }
 }
 
-/// Manage the persistent DB in a background thread with daily compaction.
-/// Drop the mem overlay for committed inserts older than `CACHE_KEEP_TIME_SECS` or beyond
-/// `MAX_CACHE_SIZE`. Only safe for committed rows: it removes them from the mem layer.
-fn evict_committed<DB: Database>(
-    committed_inserts: &mut Vec<(Instant, Box<dyn InsertTrait<DB>>)>,
-    mem_db: &MemDatabase,
-) {
-    let total_count = committed_inserts.len();
-    let mut remove_count: usize = 0;
-    for (instant, insert) in committed_inserts.iter() {
-        if instant.elapsed() > Duration::from_secs(CACHE_KEEP_TIME_SECS)
-            || total_count - remove_count > MAX_CACHE_SIZE
-        {
-            insert.clear_insert_mem(mem_db);
-            remove_count += 1;
-            continue;
+/// An op applied into a (possibly shared) write txn; its in-flight release must wait for the
+/// final commit to succeed.
+enum DeferredOp<DB: Database> {
+    Insert(Box<dyn InsertTrait<DB>>),
+    Remove(Box<dyn RemoveTrait<DB>>),
+    Clear(Box<dyn ClearTrait<DB>>),
+}
+
+impl<DB: Database> DeferredOp<DB> {
+    fn on_applied(&self, mem_db: &MemDatabase, heap: &mut EvictionHeap) {
+        match self {
+            DeferredOp::Insert(op) => op.on_applied(mem_db, heap),
+            DeferredOp::Remove(op) => op.on_applied(mem_db, heap),
+            DeferredOp::Clear(op) => op.on_applied(mem_db, heap),
         }
-        break;
     }
-    committed_inserts.drain(..remove_count);
 }
 
 /// Depth at which the writer queue is treated as a backlog: `db_run` warns (rate-limited) and
@@ -602,6 +650,10 @@ fn evict_committed<DB: Database>(
 /// drain at the next epoch boundary.
 const QUEUE_HIGH_WATER_MARK: usize = 10_000;
 const QUEUE_LAG_WARN_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Cadence of the mem cache occupancy heartbeat in `db_run`: one `info` line per interval with
+/// the cache size, its cap, the writer queue depth and the open write txn count.
+const OCCUPANCY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Pause paid by each insert/remove/clear enqueue while the queue is above
 /// [`QUEUE_HIGH_WATER_MARK`].
@@ -693,18 +745,39 @@ fn log_persist_latency(elapsed: Duration, depth: usize) {
     }
 }
 
+/// Runs one eviction pass and logs its outcome at `info`: the cache size before and after and
+/// the number of rows evicted, plus the open write transactions observed at that moment.
+/// Eviction only runs once no producer txn is open, so `open_txns` is normally 0 except at a
+/// `CaughtUp` barrier.
+fn evict_and_log(mem_db: &MemDatabase, heap: &mut EvictionHeap, max_size: usize, open_txns: usize) {
+    let EvictionStats { before, after, evicted } = mem_db.evict_if_needed(heap, max_size);
+    if evicted > 0 {
+        tracing::debug!(
+            target: "storage",
+            before,
+            after,
+            evicted,
+            open_txns,
+            "mem cache evicted"
+        );
+    }
+}
+
 fn db_run<DB: Database>(
     db: DB,
     mem_db: MemDatabase,
     rx: Receiver<DBMessage<DB>>,
     depth: Arc<AtomicUsize>,
+    max_size: usize,
 ) {
     let mut txn = None;
     let mut last_compact = Instant::now();
+    let mut last_occupancy_log = Instant::now();
     let queue_depth_gauge = writer_queue_depth_gauge();
     let mut last_lag_warn: Option<Instant> = None;
 
-    let mut committed_inserts: Vec<(Instant, Box<dyn InsertTrait<DB>>)> = Vec::with_capacity(1000);
+    let mut eviction_heap: EvictionHeap = BinaryHeap::new();
+    let mut committed_ops: Vec<DeferredOp<DB>> = Vec::with_capacity(1000);
     // last write/commit failure since the previous CaughtUp, reported by the next persist
     let mut pending_write_error: Option<String> = None;
     if let Err(e) = db.compact() {
@@ -737,9 +810,22 @@ fn db_run<DB: Database>(
                 if let Some((current_txn, count)) = txn.take() {
                     if count <= 1 {
                         match current_txn.commit() {
-                            Ok(()) => evict_committed(&mut committed_inserts, &mem_db),
-                            // surface via persist instead of aborting; rows stay in mem, not lost
+                            Ok(()) => {
+                                for op in committed_ops.drain(..) {
+                                    op.on_applied(&mem_db, &mut eviction_heap);
+                                }
+                                evict_and_log(
+                                    &mem_db,
+                                    &mut eviction_heap,
+                                    max_size,
+                                    txn.as_ref().map(|(_, count)| *count).unwrap_or(0),
+                                );
+                            }
+                            // The txn's rows stay in mem with their in-flight counts, so a failed
+                            // commit is retained (not lost, not evictable) and surfaced via
+                            // persist.
                             Err(e) => {
+                                committed_ops.clear();
                                 tracing::error!(target: "layered_db_runner", "consensus DB commit failed: {e}");
                                 pending_write_error = Some(format!("commit: {e}"));
                             }
@@ -752,21 +838,24 @@ fn db_run<DB: Database>(
             DBMessage::Insert(ins) => {
                 if let Some((txn, _)) = &mut txn {
                     if let Err(e) = ins.insert_txn(txn) {
-                        // keep the failed row in mem (not the eviction cache) so it is not lost
+                        // keep the failed row in mem (not evictable) so it is not lost
                         tracing::error!(target: "layered_db_runner", "DB TXN Insert: {e}");
                         pending_write_error = Some(format!("insert: {e}"));
                     } else {
-                        committed_inserts.push((Instant::now(), ins));
-
-                        // Rayls: limit layer growth between commits
-                        if committed_inserts.len() > MAX_CACHE_SIZE * 2 {
-                            evict_committed(&mut committed_inserts, &mem_db);
-                        }
+                        committed_ops.push(DeferredOp::Insert(ins));
                     }
                 } else if let Err(e) = ins.insert(&db) {
+                    // keep the failed row in mem (with its in-flight count, so not evictable)
                     tracing::error!(target: "layered_db_runner", "DB Insert: {e}");
-                    ins.clear_insert_mem(&mem_db);
                     pending_write_error = Some(format!("insert: {e}"));
+                } else {
+                    ins.on_applied(&mem_db, &mut eviction_heap);
+                    evict_and_log(
+                        &mem_db,
+                        &mut eviction_heap,
+                        max_size,
+                        txn.as_ref().map(|(_, count)| *count).unwrap_or(0),
+                    );
                 }
             }
             DBMessage::Remove(rm) => {
@@ -774,10 +863,20 @@ fn db_run<DB: Database>(
                     if let Err(e) = rm.remove_txn(txn, &mem_db) {
                         tracing::error!(target: "layered_db_runner", "DB TXN Remove: {e}");
                         pending_write_error = Some(format!("remove: {e}"));
+                    } else {
+                        committed_ops.push(DeferredOp::Remove(rm));
                     }
                 } else if let Err(e) = rm.remove(&db, &mem_db) {
                     tracing::error!(target: "layered_db_runner", "DB Remove: {e}");
                     pending_write_error = Some(format!("remove: {e}"));
+                } else {
+                    rm.on_applied(&mem_db, &mut eviction_heap);
+                    evict_and_log(
+                        &mem_db,
+                        &mut eviction_heap,
+                        max_size,
+                        txn.as_ref().map(|(_, count)| *count).unwrap_or(0),
+                    );
                 }
             }
             DBMessage::Clear(clr) => {
@@ -785,15 +884,31 @@ fn db_run<DB: Database>(
                     if let Err(e) = clr.clear_table_txn(txn, &mem_db) {
                         tracing::error!("DB TXN Clear table: {e}");
                         pending_write_error = Some(format!("clear: {e}"));
+                    } else {
+                        committed_ops.push(DeferredOp::Clear(clr));
                     }
                 } else if let Err(e) = clr.clear_table(&db, &mem_db) {
                     tracing::error!("DB Clear: {e}");
                     pending_write_error = Some(format!("clear: {e}"));
+                } else {
+                    clr.on_applied(&mem_db, &mut eviction_heap);
+                    evict_and_log(
+                        &mem_db,
+                        &mut eviction_heap,
+                        max_size,
+                        txn.as_ref().map(|(_, count)| *count).unwrap_or(0),
+                    );
                 }
             }
             // NOTE: proves prior messages were applied, not that an open shared txn committed.
             // Safe at shutdown because consensus writers are torn down before persist runs.
             DBMessage::CaughtUp(tx) => {
+                evict_and_log(
+                    &mem_db,
+                    &mut eviction_heap,
+                    max_size,
+                    txn.as_ref().map(|(_, count)| *count).unwrap_or(0),
+                );
                 let reply: Result<(), String> = match pending_write_error.take() {
                     Some(e) => Err(e),
                     None => Ok(()),
@@ -802,6 +917,17 @@ fn db_run<DB: Database>(
             }
             DBMessage::Shutdown => break,
         }
+        if last_occupancy_log.elapsed() >= OCCUPANCY_LOG_INTERVAL {
+            last_occupancy_log = Instant::now();
+            tracing::info!(
+                target: "storage",
+                occupancy = mem_db.mem_size(),
+                max = max_size,
+                queue = queued,
+                open_txns = txn.as_ref().map(|(_, count)| *count).unwrap_or(0),
+                "mem cache occupancy"
+            );
+        }
         if last_compact.elapsed() > Duration::from_secs(86_400) {
             last_compact = Instant::now();
             if let Err(e) = db.compact() {
@@ -809,7 +935,7 @@ fn db_run<DB: Database>(
             }
         }
     }
-    tracing::info!(target: "layered_db_runner", "Layerd DB thread Shutdown complete");
+    tracing::info!(target: "layered_db_runner", "Layered DB thread Shutdown complete");
 }
 
 /// In-memory cache layer over a persistent database with background writes.
@@ -847,6 +973,18 @@ impl<DB: Database> Drop for LayeredDatabase<DB> {
 
 impl<DB: Database> LayeredDatabase<DB> {
     pub fn open(db: DB) -> Self {
+        Self::open_with_config(db, CacheConfig::default())
+    }
+
+    /// Opens the layered DB with a custom eviction policy: small caches in tests, the default in
+    /// production.
+    pub fn open_with_config(db: DB, config: CacheConfig) -> Self {
+        // This channel must always remain unbounded. This is necessary for the atomicity
+        // guarantee (mem mutation + enqueue in one critical section). It is safe today because
+        // mpsc::channel() is unbounded and send() never blocks. However, if the channel is ever
+        // changed to a bounded sync_channel (for backpressure), the producer would block with the
+        // write lock held while the writer thread is blocked trying to acquire the same lock to
+        // process the ops — a classic deadlock.
         let (tx, rx) = mpsc::channel();
         let depth = Arc::new(AtomicUsize::new(0));
         let db_cloned = db.clone();
@@ -854,7 +992,7 @@ impl<DB: Database> LayeredDatabase<DB> {
         let mem_db_clone = mem_db.clone();
         let queue_depth = Arc::clone(&depth);
         let thread = Some(Arc::new(std::thread::spawn(move || {
-            db_run(db_cloned, mem_db_clone, rx, queue_depth)
+            db_run(db_cloned, mem_db_clone, rx, queue_depth, config.max_size)
         })));
         Self {
             mem_db,
@@ -940,10 +1078,13 @@ impl<DB: Database> LayeredDatabase<DB> {
     /// (`record_prior_to`), so a deep floor never pays for the rows above it.
     pub fn reverse_skip_to<T: Table>(&self, key: &T::Key) -> eyre::Result<DBIter<'_, T>> {
         let db = &self.db;
-        let db_first = db
-            .get::<T>(key)?
-            .map(|value| (key.clone(), value))
-            .or_else(|| db.record_prior_to::<T>(key));
+        let db_first = if self.mem_db.is_clearing::<T>() {
+            None
+        } else {
+            db.get::<T>(key)?
+                .map(|value| (key.clone(), value))
+                .or_else(|| db.record_prior_to::<T>(key))
+        };
         let db_iter: DBIter<'_, T> =
             Box::new(std::iter::successors(db_first, move |(k, _)| db.record_prior_to::<T>(k)));
 
@@ -1056,12 +1197,17 @@ impl<DB: Database> Database for LayeredDatabase<DB> {
     }
 
     fn contains_key<T: Table>(&self, key: &T::Key) -> eyre::Result<bool> {
-        let hot = if self.mem_db.is_tombstoned::<T>(key) {
-            false
-        } else {
-            self.mem_db.contains_key::<T>(key)? || self.db.contains_key::<T>(key)?
-        };
-        if hot {
+        if self.mem_db.is_tombstoned::<T>(key) {
+            return Ok(false);
+        }
+        if self.mem_db.contains_key::<T>(key)? {
+            return Ok(true);
+        }
+        if self.mem_db.is_clearing::<T>() {
+            // The table's clear is pending: keys not live in the cache are gone, not stale.
+            return self.cold_has::<T>(key);
+        }
+        if self.db.contains_key::<T>(key)? {
             return Ok(true);
         }
         self.cold_has::<T>(key)
@@ -1075,6 +1221,11 @@ impl<DB: Database> Database for LayeredDatabase<DB> {
             None
         } else if let Some((_, val)) = self.mem_db.get_marked::<T>(key)? {
             Some(val)
+        } else if self.mem_db.is_clearing::<T>() {
+            // The table's clear is pending: keys evicted from the cache (or never cached, e.g.
+            // right after startup) are gone, not stale - do not fall through to the persistent
+            // tier.
+            None
         } else {
             self.db.get::<T>(key)?
         };
@@ -1085,24 +1236,28 @@ impl<DB: Database> Database for LayeredDatabase<DB> {
     }
 
     fn insert<T: Table>(&self, key: &T::Key, value: &T::Value) -> eyre::Result<()> {
-        self.mem_db.insert::<T>(key, value)?;
-        let ins = Box::new(KeyValueInsert::<T> { key: key.clone(), value: value.clone() });
-        self.tx.send(DBMessage::Insert(ins)).map_err(|_| eyre::eyre!("DB thread gone, FATAL!"))?;
-        Ok(())
+        // The mem mutation, the in-flight increment and the enqueue share one critical section:
+        // channel order equals mem order, so a zero in-flight count is a sound "no queued ops".
+        self.mem_db.insert_queued::<T>(key, value, || {
+            let ins = Box::new(KeyValueInsert::<T> { key: key.clone(), value: value.clone() });
+            self.tx.send(DBMessage::Insert(ins)).map_err(|_| eyre::eyre!("DB thread gone, FATAL!"))
+        })
     }
 
     fn remove<T: Table>(&self, key: &T::Key) -> eyre::Result<()> {
-        self.mem_db.remove::<T>(key)?;
-        let rm = Box::new(KeyRemove::<T> { key: key.clone() });
-        self.tx.send(DBMessage::Remove(rm)).map_err(|_| eyre::eyre!("DB thread gone, FATAL!"))?;
-        Ok(())
+        self.mem_db.remove_queued::<T>(key, || {
+            let rm = Box::new(KeyRemove::<T> { key: key.clone() });
+            self.tx.send(DBMessage::Remove(rm)).map_err(|_| eyre::eyre!("DB thread gone, FATAL!"))
+        })
     }
 
     fn clear_table<T: Table>(&self) -> eyre::Result<()> {
-        self.mem_db.clear_table::<T>()?;
-        let clr = Box::new(ClearTable::<T> { _casper: PhantomData });
-        self.tx.send(DBMessage::Clear(clr)).map_err(|_| eyre::eyre!("DB thread gone, FATAL!"))?;
-        Ok(())
+        // The clear tombstones every row and bumps each in-flight count under the same lock that
+        // captures the key set for the writer, so no tombstone is evicted before the clear lands.
+        self.mem_db.clear_table_queued::<T>(|keys| {
+            let clr = Box::new(ClearTable::<T> { _marker: PhantomData, keys });
+            self.tx.send(DBMessage::Clear(clr)).map_err(|_| eyre::eyre!("DB thread gone, FATAL!"))
+        })
     }
 
     fn is_empty<T: Table>(&self) -> bool {
@@ -1114,7 +1269,12 @@ impl<DB: Database> Database for LayeredDatabase<DB> {
     }
 
     fn iter<T: Table>(&self) -> DBIter<'_, T> {
-        let db_iter = self.db.iter::<T>();
+        let db_iter = if self.mem_db.is_clearing::<T>() {
+            // Pending clear: the persistent tier is stale, so the merge must not see its rows.
+            Box::new(std::iter::empty())
+        } else {
+            self.db.iter::<T>()
+        };
         let mem_iter = self.mem_db.iter::<T>();
         let is_tombstoned: Box<dyn Fn(&T::Key) -> bool + '_> =
             Box::new(|k| self.mem_db.is_tombstoned::<T>(k));
@@ -1124,7 +1284,11 @@ impl<DB: Database> Database for LayeredDatabase<DB> {
     }
 
     fn raw_iter<T: Table>(&self) -> DBRawIter<'_> {
-        let db_iter = self.db.raw_iter::<T>();
+        let db_iter = if self.mem_db.is_clearing::<T>() {
+            Box::new(std::iter::empty())
+        } else {
+            self.db.raw_iter::<T>()
+        };
         let mem_iter = self.mem_db.raw_iter::<T>();
         let is_tombstoned: Box<dyn Fn(&T::Key) -> bool + '_> =
             Box::new(|k| self.mem_db.is_tombstoned::<T>(k));
@@ -1134,7 +1298,11 @@ impl<DB: Database> Database for LayeredDatabase<DB> {
     }
 
     fn skip_to<T: Table>(&self, key: &T::Key) -> eyre::Result<DBIter<'_, T>> {
-        let db_iter = self.db.skip_to::<T>(key)?;
+        let db_iter = if self.mem_db.is_clearing::<T>() {
+            Box::new(std::iter::empty())
+        } else {
+            self.db.skip_to::<T>(key)?
+        };
         let mem_iter = self.mem_db.skip_to::<T>(key)?;
         let is_tombstoned: Box<dyn Fn(&T::Key) -> bool + '_> =
             Box::new(|k| self.mem_db.is_tombstoned::<T>(k));
@@ -1144,7 +1312,11 @@ impl<DB: Database> Database for LayeredDatabase<DB> {
     }
 
     fn reverse_iter<T: Table>(&self) -> DBIter<'_, T> {
-        let db_iter = self.db.reverse_iter::<T>();
+        let db_iter = if self.mem_db.is_clearing::<T>() {
+            Box::new(std::iter::empty())
+        } else {
+            self.db.reverse_iter::<T>()
+        };
         let mem_iter = self.mem_db.reverse_iter::<T>();
         let is_tombstoned: Box<dyn Fn(&T::Key) -> bool + '_> =
             Box::new(|k| self.mem_db.is_tombstoned::<T>(k));
@@ -1154,7 +1326,11 @@ impl<DB: Database> Database for LayeredDatabase<DB> {
     }
 
     fn reverse_raw_iter<T: Table>(&self) -> DBRawIter<'_> {
-        let db_iter = self.db.reverse_raw_iter::<T>();
+        let db_iter = if self.mem_db.is_clearing::<T>() {
+            Box::new(std::iter::empty())
+        } else {
+            self.db.reverse_raw_iter::<T>()
+        };
         let mem_iter = self.mem_db.reverse_raw_iter::<T>();
         let is_tombstoned: Box<dyn Fn(&T::Key) -> bool + '_> =
             Box::new(|k| self.mem_db.is_tombstoned::<T>(k));
@@ -1233,18 +1409,23 @@ impl<DB: Database> Database for LayeredDatabase<DB> {
 trait InsertTrait<DB: Database>: Send + 'static {
     fn insert(&self, db: &DB) -> eyre::Result<()>;
     fn insert_txn(&self, txn: &mut DB::TXMut<'_>) -> eyre::Result<()>;
-    /// Clear the inserted data from the memdb.
-    fn clear_insert_mem(&self, mem_db: &MemDatabase);
+    /// Release the in-flight op for the inserted key once the write is durably applied; at zero
+    /// the key becomes an eviction candidate.
+    fn on_applied(&self, mem_db: &MemDatabase, heap: &mut EvictionHeap);
 }
 
 trait RemoveTrait<DB: Database>: Send + 'static {
     fn remove(&self, db: &DB, mem_db: &MemDatabase) -> eyre::Result<()>;
     fn remove_txn(&self, txn: &mut DB::TXMut<'_>, mem_db: &MemDatabase) -> eyre::Result<()>;
+    /// Release the in-flight op for the removed key(s) once the delete is durably applied.
+    fn on_applied(&self, mem_db: &MemDatabase, heap: &mut EvictionHeap);
 }
 
 trait ClearTrait<DB: Database>: Send + 'static {
     fn clear_table(&self, db: &DB, mem_db: &MemDatabase) -> eyre::Result<()>;
     fn clear_table_txn(&self, txn: &mut DB::TXMut<'_>, mem_db: &MemDatabase) -> eyre::Result<()>;
+    /// Release the in-flight op of every tombstoned key once the clear is durably applied.
+    fn on_applied(&self, mem_db: &MemDatabase, heap: &mut EvictionHeap);
 }
 
 struct KeyValueInsert<T: Table> {
@@ -1261,7 +1442,10 @@ struct KeyRemoveBatch<T: Table> {
 }
 
 struct ClearTable<T: Table> {
-    _casper: PhantomData<T>,
+    /// Raw keys tombstoned by the producer's clear: each must release its in-flight op when the
+    /// persistent clear applies, so no tombstone is evicted before then.
+    keys: Vec<Vec<u8>>,
+    _marker: PhantomData<T>,
 }
 
 impl<T: Table, DB: Database> InsertTrait<DB> for KeyValueInsert<T> {
@@ -1271,13 +1455,14 @@ impl<T: Table, DB: Database> InsertTrait<DB> for KeyValueInsert<T> {
     fn insert_txn(&self, txn: &mut DB::TXMut<'_>) -> eyre::Result<()> {
         txn.insert::<T>(&self.key, &self.value)
     }
-    fn clear_insert_mem(&self, mem_db: &MemDatabase) {
-        let _ = mem_db.delete_tombstoned::<T>(&self.key, false);
+    fn on_applied(&self, mem_db: &MemDatabase, heap: &mut EvictionHeap) {
+        mem_db.on_op_applied(T::NAME, &encode_key(&self.key), heap);
     }
 }
 
 // Tombstones are NOT eagerly cleared from mem after persistent delete;
 // doing so races with the main thread's reads (MDBX write not yet visible).
+// They are released by the eviction heap once their in-flight count settles.
 impl<T: Table, DB: Database> RemoveTrait<DB> for KeyRemove<T> {
     fn remove(&self, db: &DB, mem_db: &MemDatabase) -> eyre::Result<()> {
         // skip if key was re-inserted after the remove was queued
@@ -1296,6 +1481,10 @@ impl<T: Table, DB: Database> RemoveTrait<DB> for KeyRemove<T> {
             return Ok(());
         }
         txn.remove::<T>(&self.key)
+    }
+
+    fn on_applied(&self, mem_db: &MemDatabase, heap: &mut EvictionHeap) {
+        mem_db.on_op_applied(T::NAME, &encode_key(&self.key), heap);
     }
 }
 
@@ -1326,6 +1515,12 @@ impl<T: Table, DB: Database> RemoveTrait<DB> for KeyRemoveBatch<T> {
         }
         Ok(())
     }
+
+    fn on_applied(&self, mem_db: &MemDatabase, heap: &mut EvictionHeap) {
+        for key in &self.keys {
+            mem_db.on_op_applied(T::NAME, &encode_key(key), heap);
+        }
+    }
 }
 
 impl<T: Table, DB: Database> ClearTrait<DB> for ClearTable<T> {
@@ -1340,6 +1535,10 @@ impl<T: Table, DB: Database> ClearTrait<DB> for ClearTable<T> {
         _mem_db: &MemDatabase,
     ) -> eyre::Result<()> {
         txn.clear_table::<T>()
+    }
+
+    fn on_applied(&self, mem_db: &MemDatabase, heap: &mut EvictionHeap) {
+        mem_db.on_clear_applied::<T>(&self.keys, heap);
     }
 }
 
@@ -1369,7 +1568,10 @@ impl<DB: Database> Debug for DBMessage<DB> {
 
 #[cfg(test)]
 mod test {
-    use super::{DBMessage, InsertTrait, LayeredDatabase, QUEUE_HIGH_WATER_MARK, QUEUE_PACE_SLEEP};
+    use super::{
+        CacheConfig, DBMessage, EvictionHeap, InsertTrait, LayeredDatabase, QUEUE_HIGH_WATER_MARK,
+        QUEUE_PACE_SLEEP,
+    };
     #[cfg(feature = "redb")]
     use crate::redb::ReDB;
     use crate::{
@@ -1377,8 +1579,8 @@ mod test {
         mem_db::MemDatabase,
         test::*,
     };
-    use rayls_infrastructure_types::{Database, DbTxMut};
-    use std::{path::Path, time::Instant};
+    use rayls_infrastructure_types::{DBIter, DBRawIter, Database, DbTxMut, Table};
+    use std::{path::Path, sync::Arc, time::Instant};
     use tempfile::tempdir;
 
     #[cfg(feature = "redb")]
@@ -1396,6 +1598,183 @@ mod test {
         let db = LayeredDatabase::open(db);
         db.open_table::<TestTable>().expect("failed to open table!");
         db
+    }
+
+    /// A [`MemDatabase`] whose `clear_table` parks until released: lets a test hold the
+    /// producer's clear window open deterministically while the writer is parked mid-apply.
+    #[derive(Clone, Debug)]
+    struct BlockingClearDb {
+        inner: MemDatabase,
+        state: Arc<parking_lot::Mutex<BlockState>>,
+        cv: Arc<parking_lot::Condvar>,
+    }
+
+    #[derive(Debug, Default)]
+    struct BlockState {
+        /// The next `clear_table` parks until `release_clear` is called.
+        block: bool,
+        /// The writer is parked inside `clear_table`.
+        entered: bool,
+    }
+
+    impl BlockingClearDb {
+        fn new() -> Self {
+            Self {
+                inner: MemDatabase::new(),
+                state: Arc::new(parking_lot::Mutex::new(BlockState::default())),
+                cv: Arc::new(parking_lot::Condvar::new()),
+            }
+        }
+
+        /// Park the writer's next `clear_table` until [`Self::release_clear`].
+        fn block_clear(&self) {
+            self.state.lock().block = true;
+        }
+
+        /// Signal the parked writer to proceed with the persistent clear.
+        fn release_clear(&self) {
+            self.state.lock().block = false;
+            self.cv.notify_all();
+        }
+
+        /// Blocks until the writer is parked inside `clear_table`: at that point the producer's
+        /// clear window is provably still open.
+        fn wait_clear_entered(&self) {
+            let mut state = self.state.lock();
+            while !state.entered {
+                self.cv.wait(&mut state);
+            }
+        }
+    }
+
+    impl Database for BlockingClearDb {
+        type TX<'txn>
+            = crate::mem_db::MemDbTx<'txn>
+        where
+            Self: 'txn;
+
+        type TXMut<'txn>
+            = crate::mem_db::MemDbTxMut<'txn>
+        where
+            Self: 'txn;
+
+        fn open_table<T: Table>(&self) -> eyre::Result<()> {
+            self.inner.open_table::<T>()
+        }
+        fn read_txn(&self) -> eyre::Result<Self::TX<'_>> {
+            self.inner.read_txn()
+        }
+        fn write_txn(&self) -> eyre::Result<Self::TXMut<'_>> {
+            self.inner.write_txn()
+        }
+        fn contains_key<T: Table>(&self, key: &T::Key) -> eyre::Result<bool> {
+            self.inner.contains_key::<T>(key)
+        }
+        fn get<T: Table>(&self, key: &T::Key) -> eyre::Result<Option<T::Value>> {
+            self.inner.get::<T>(key)
+        }
+        fn insert<T: Table>(&self, key: &T::Key, value: &T::Value) -> eyre::Result<()> {
+            self.inner.insert::<T>(key, value)
+        }
+        fn remove<T: Table>(&self, key: &T::Key) -> eyre::Result<()> {
+            self.inner.remove::<T>(key)
+        }
+        fn clear_table<T: Table>(&self) -> eyre::Result<()> {
+            {
+                let mut state = self.state.lock();
+                if state.block {
+                    state.entered = true;
+                    self.cv.notify_all();
+                    while state.block {
+                        self.cv.wait(&mut state);
+                    }
+                }
+            }
+            self.inner.clear_table::<T>()
+        }
+        fn is_empty<T: Table>(&self) -> bool {
+            self.inner.is_empty::<T>()
+        }
+        fn iter<T: Table>(&self) -> DBIter<'_, T> {
+            self.inner.iter::<T>()
+        }
+        fn raw_iter<T: Table>(&self) -> DBRawIter<'_> {
+            self.inner.raw_iter::<T>()
+        }
+        fn skip_to<T: Table>(&self, key: &T::Key) -> eyre::Result<DBIter<'_, T>> {
+            self.inner.skip_to::<T>(key)
+        }
+        fn reverse_iter<T: Table>(&self) -> DBIter<'_, T> {
+            self.inner.reverse_iter::<T>()
+        }
+        fn reverse_raw_iter<T: Table>(&self) -> DBRawIter<'_> {
+            self.inner.reverse_raw_iter::<T>()
+        }
+        fn record_prior_to<T: Table>(&self, key: &T::Key) -> Option<(T::Key, T::Value)> {
+            self.inner.record_prior_to::<T>(key)
+        }
+        fn last_record<T: Table>(&self) -> Option<(T::Key, T::Value)> {
+            self.inner.last_record::<T>()
+        }
+    }
+
+    /// Releases the writer's parked clear on drop, so a panicked assertion cannot deadlock the
+    /// writer join at test teardown.
+    struct ClearRelease<'a>(&'a BlockingClearDb);
+
+    impl Drop for ClearRelease<'_> {
+        fn drop(&mut self) {
+            self.0.release_clear();
+        }
+    }
+
+    /// `clear_table` tombstones only the cached rows, so keys already evicted from the cache have
+    /// nothing to hide behind: without the pending-clear gate they read stale pre-clear values
+    /// from the persistent tier until the writer applies the clear. The pending-clear flag must
+    /// close that window for `get`, `contains_key` and every iterator.
+    #[test]
+    fn clear_hides_evicted_keys_until_the_clear_applies() {
+        let inner = BlockingClearDb::new();
+        let db = LayeredDatabase::open_with_config(inner.clone(), CacheConfig { max_size: 2 });
+        db.open_table::<TestTable>().expect("open layered table");
+
+        db.insert::<TestTable>(&1, &"one".to_string()).expect("insert");
+        db.insert::<TestTable>(&2, &"two".to_string()).expect("insert");
+        db.insert::<TestTable>(&3, &"three".to_string()).expect("insert");
+        db.sync_persist();
+        // Key 1 settled first and was evicted: it is now live only in the persistent tier.
+        assert_eq!(db.mem_db.mem_size(), 2, "key 1 must be evicted");
+        assert!(!db.mem_db.contains_key::<TestTable>(&1).unwrap());
+
+        inner.block_clear();
+        let _release = ClearRelease(&inner);
+        db.clear_table::<TestTable>().expect("clear");
+        inner.wait_clear_entered();
+        // The writer is parked inside the persistent clear: the producer's window is open.
+        assert!(db.mem_db.is_clearing::<TestTable>());
+
+        // The evicted key must not leak from the persistent tier while the clear is pending.
+        assert_eq!(db.get::<TestTable>(&1).unwrap(), None, "evicted key must read as cleared");
+        assert_eq!(db.get::<TestTable>(&2).unwrap(), None, "cached key must read as cleared");
+        assert_eq!(db.get::<TestTable>(&3).unwrap(), None, "cached key must read as cleared");
+        assert!(!db.contains_key::<TestTable>(&1).unwrap(), "evicted key must not contain");
+        assert!(
+            db.iter::<TestTable>().collect::<Vec<_>>().is_empty(),
+            "iter must not leak stale rows"
+        );
+        assert!(db.is_empty::<TestTable>(), "table must read empty while the clear is pending");
+        // Writes during the window still read through the mem overlay.
+        db.insert::<TestTable>(&4, &"four".to_string()).expect("insert");
+        assert_eq!(db.get::<TestTable>(&4).unwrap(), Some("four".to_string()));
+
+        inner.release_clear();
+        db.sync_persist();
+        assert_eq!(db.get::<TestTable>(&1).unwrap(), None, "clear must land");
+        assert!(!db.mem_db.is_clearing::<TestTable>(), "pending-clear flag must settle");
+
+        db.insert::<TestTable>(&5, &"five".to_string()).expect("insert");
+        db.sync_persist();
+        assert_eq!(db.get::<TestTable>(&5).unwrap(), Some("five".to_string()));
     }
 
     /// `evict_persistent_batch` must drop exactly the given keys from the durable layer and leave
@@ -1465,19 +1844,34 @@ mod test {
     }
 
     /// Writer message that parks `db_run` until the paired sender is dropped, so a test can pin a
-    /// real enqueued backlog behind a stalled writer.
-    struct WriterGate(std::sync::mpsc::Receiver<()>);
+    /// real enqueued backlog behind a stalled writer. It signals `reached` just before parking, so
+    /// a test can wait deterministically for the writer to have drained up to the gate instead
+    /// of sleeping on a fixed timeout.
+    struct WriterGate {
+        park: std::sync::mpsc::Receiver<()>,
+        reached: std::sync::mpsc::Sender<()>,
+    }
 
     impl<DB: Database> InsertTrait<DB> for WriterGate {
         fn insert(&self, _db: &DB) -> eyre::Result<()> {
-            let _ = self.0.recv();
+            let _ = self.reached.send(());
+            let _ = self.park.recv();
             Ok(())
         }
         fn insert_txn(&self, _txn: &mut DB::TXMut<'_>) -> eyre::Result<()> {
-            let _ = self.0.recv();
+            let _ = self.reached.send(());
+            let _ = self.park.recv();
             Ok(())
         }
-        fn clear_insert_mem(&self, _mem_db: &MemDatabase) {}
+        fn on_applied(&self, _mem_db: &MemDatabase, _heap: &mut EvictionHeap) {}
+    }
+
+    /// A `(release, reached, gate)` triple: dropping `release` lets the writer pass the gate, and
+    /// `reached` fires once the writer has drained up to and parked at the gate.
+    fn writer_gate() -> (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>, WriterGate) {
+        let (release, park) = std::sync::mpsc::channel::<()>();
+        let (reached, reached_rx) = std::sync::mpsc::channel::<()>();
+        (release, reached_rx, WriterGate { park, reached })
     }
 
     /// A producer bursting into a seeded writer backlog must be paced above the high-water mark,
@@ -1491,8 +1885,8 @@ mod test {
         db.open_table::<TestTable>().expect("open layered table");
 
         // Park the writer behind a gate so the seeded backlog cannot drain mid-measurement.
-        let (release, gate) = std::sync::mpsc::channel::<()>();
-        db.tx.send(DBMessage::Insert(Box::new(WriterGate(gate)))).expect("gate enqueue");
+        let (release, _reached, gate) = writer_gate();
+        db.tx.send(DBMessage::Insert(Box::new(gate))).expect("gate enqueue");
 
         // Seed one message past the mark: every enqueue here is at or below it, hence unpaced.
         let value = "v".to_string();
@@ -1526,6 +1920,188 @@ mod test {
             "seeding below the high-water mark took {seed_elapsed:?}: enqueues under the high-water mark \
              must not be paced",
         );
+    }
+
+    /// Insert a burst of keys into a tiny cache and confirm the writer evicts settled keys in
+    /// recency order until the cache fits `max_size`, with the newest rows surviving in mem.
+    #[test]
+    fn eviction_keeps_cache_at_max_size_and_evicts_oldest_settled() {
+        let inner = MemDatabase::new();
+        inner.open_table::<TestTable>().expect("open inner table");
+        let db = LayeredDatabase::open_with_config(inner, CacheConfig { max_size: 3 });
+        db.open_table::<TestTable>().expect("open layered table");
+
+        for i in 0..10u64 {
+            db.insert::<TestTable>(&i, &format!("v{i}")).expect("insert");
+        }
+        db.sync_persist();
+
+        assert_eq!(db.mem_db.mem_size(), 3, "cache must be trimmed to max_size");
+        // The newest rows survive hot; older ones fall through to the persistent tier.
+        for i in 0..10u64 {
+            assert_eq!(
+                db.get::<TestTable>(&i).unwrap().as_deref(),
+                Some(format!("v{i}").as_str()),
+                "every key must still be readable after eviction"
+            );
+        }
+        for i in 7..10u64 {
+            assert!(
+                db.mem_db.contains_key::<TestTable>(&i).unwrap(),
+                "newest key {i} must stay hot"
+            );
+        }
+        for i in 0..7u64 {
+            assert!(
+                !db.mem_db.contains_key::<TestTable>(&i).unwrap(),
+                "settled key {i} must be evicted"
+            );
+        }
+    }
+
+    /// A tombstone whose remove is still queued must not be evicted, even when the cache is over
+    /// its cap: the row shields reads from the persistent tier until the delete lands. Once the
+    /// remove applies, the tombstone settles and becomes an eviction candidate.
+    #[test]
+    fn eviction_waits_for_in_flight_ops() {
+        let inner = MemDatabase::new();
+        inner.open_table::<TestTable>().expect("open inner table");
+        let db = LayeredDatabase::open_with_config(inner, CacheConfig { max_size: 1 });
+        db.open_table::<TestTable>().expect("open layered table");
+
+        // Two gates park the writer mid-drain so the in-flight window is observable.
+        let (release, gate1_reached, gate1) = writer_gate();
+        let (release2, gate2_reached, gate2) = writer_gate();
+        db.tx.send(DBMessage::Insert(Box::new(gate1))).expect("gate1 enqueue");
+        db.insert::<TestTable>(&1, &"one".to_string()).expect("insert k1");
+        db.tx.send(DBMessage::Insert(Box::new(gate2))).expect("gate2 enqueue");
+        db.remove::<TestTable>(&1).expect("remove k1");
+        db.insert::<TestTable>(&2, &"two".to_string()).expect("insert k2");
+
+        // Let the writer drain past K1's insert, then wait until it parks at gate2: K1's tombstone
+        // and K2's row are both in flight (count > 0), so eviction (run at every apply) must not
+        // drop anything even though the cache holds 2 rows against a cap of 1. Gate messages are
+        // processed in enqueue order, so gate2 being reached proves gate1 was drained.
+        drop(release);
+        let _ = gate1_reached.recv().expect("writer drains past gate1");
+        let _ = gate2_reached.recv().expect("writer parks at gate2");
+        assert_eq!(
+            db.mem_db.mem_size(),
+            2,
+            "in-flight rows must not be evicted while ops are queued"
+        );
+        assert!(
+            db.mem_db.is_tombstoned::<TestTable>(&1),
+            "K1's tombstone must survive while queued"
+        );
+        drop(release2);
+        db.sync_persist();
+
+        // The remove applied, so K1's settled tombstone is now evictable; only K2 stays hot.
+        assert_eq!(db.mem_db.mem_size(), 1, "settled rows must be trimmed to max_size");
+        assert!(
+            !db.mem_db.is_tombstoned::<TestTable>(&1),
+            "K1 tombstone must be evicted post-apply"
+        );
+        assert!(db.mem_db.contains_key::<TestTable>(&2).unwrap(), "K2 must stay hot");
+        assert_eq!(db.get::<TestTable>(&1).unwrap(), None, "K1 is durably removed");
+        assert_eq!(db.get::<TestTable>(&2).unwrap(), Some("two".to_string()));
+    }
+
+    /// A tombstone for a key that was never in the cache (deleted from the persistent tier only)
+    /// must not leak: it settles when the remove applies and is evicted like any other row.
+    #[test]
+    fn removed_never_inserted_tombstone_is_evicted() {
+        let inner = MemDatabase::new();
+        inner.open_table::<TestTable>().expect("open inner table");
+        let db = LayeredDatabase::open_with_config(inner, CacheConfig { max_size: 1 });
+        db.open_table::<TestTable>().expect("open layered table");
+
+        db.remove::<TestTable>(&999).expect("remove never-inserted key");
+        db.insert::<TestTable>(&1, &"one".to_string()).expect("insert");
+        db.insert::<TestTable>(&2, &"two".to_string()).expect("insert");
+        db.sync_persist();
+
+        assert_eq!(db.get::<TestTable>(&999).unwrap(), None);
+        assert!(!db.mem_db.is_tombstoned::<TestTable>(&999), "stray tombstone must be evicted");
+        assert_eq!(db.mem_db.mem_size(), 1, "cache must be trimmed");
+    }
+
+    /// A `clear_table` tombstones every cached row and holds them (in flight) until the persistent
+    /// clear lands; only then are the tombstones released and evicted.
+    #[test]
+    fn clear_tombstones_are_held_until_the_persistent_clear_lands() {
+        let inner = MemDatabase::new();
+        inner.open_table::<TestTable>().expect("open inner table");
+        let db = LayeredDatabase::open_with_config(inner, CacheConfig { max_size: 2 });
+        db.open_table::<TestTable>().expect("open layered table");
+
+        db.insert::<TestTable>(&1, &"one".to_string()).expect("insert");
+        db.insert::<TestTable>(&2, &"two".to_string()).expect("insert");
+        db.insert::<TestTable>(&3, &"three".to_string()).expect("insert");
+        db.clear_table::<TestTable>().expect("clear");
+        db.insert::<TestTable>(&4, &"four".to_string()).expect("insert");
+        db.sync_persist();
+
+        assert_eq!(db.get::<TestTable>(&1).unwrap(), None);
+        assert_eq!(db.get::<TestTable>(&2).unwrap(), None);
+        assert_eq!(db.get::<TestTable>(&3).unwrap(), None);
+        assert_eq!(db.get::<TestTable>(&4).unwrap(), Some("four".to_string()));
+        assert_eq!(db.mem_db.mem_size(), 2, "cleared tombstones settle and are evicted");
+    }
+
+    /// Reading a hot key refreshes its recency (lock-free, throttled), so it survives eviction over
+    /// a sibling that settled at the same time but was never read since.
+    #[test]
+    fn read_recency_protects_a_hot_key() {
+        let inner = MemDatabase::new();
+        inner.open_table::<TestTable>().expect("open inner table");
+        let db = LayeredDatabase::open_with_config(inner, CacheConfig { max_size: 2 });
+        db.open_table::<TestTable>().expect("open layered table");
+
+        for i in 1..=3u64 {
+            db.insert::<TestTable>(&i, &format!("v{i}")).expect("insert");
+        }
+        db.sync_persist();
+        // 1 settled first and was evicted; 2 and 3 are hot.
+        assert!(db.mem_db.contains_key::<TestTable>(&2).unwrap());
+        assert!(db.mem_db.contains_key::<TestTable>(&3).unwrap());
+
+        // Cross the recency throttle window, then read key 2: its clock bumps.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert_eq!(db.get::<TestTable>(&2).unwrap(), Some("v2".to_string()));
+
+        // Overflow the cache: without the read bump, key 2 (settled first) would be evicted.
+        db.insert::<TestTable>(&4, &"v4".to_string()).expect("insert");
+        db.sync_persist();
+
+        assert_eq!(db.mem_db.mem_size(), 2);
+        assert!(db.mem_db.contains_key::<TestTable>(&2).unwrap(), "read key must stay hot");
+        assert!(db.mem_db.contains_key::<TestTable>(&4).unwrap(), "newest key must stay hot");
+        assert!(
+            !db.mem_db.contains_key::<TestTable>(&3).unwrap(),
+            "unread sibling must be evicted"
+        );
+    }
+
+    /// Remove-then-reinsert of the same key must not leak its in-flight count: the remove's apply
+    /// is skipped by the re-insert guard, but it still settles, so the row stays evictable.
+    #[test]
+    fn guard_skipped_remove_still_settles() {
+        let inner = MemDatabase::new();
+        inner.open_table::<TestTable>().expect("open inner table");
+        let db = LayeredDatabase::open_with_config(inner, CacheConfig { max_size: 1 });
+        db.open_table::<TestTable>().expect("open layered table");
+
+        db.insert::<TestTable>(&1, &"v1".to_string()).expect("insert");
+        db.remove::<TestTable>(&1).expect("remove");
+        db.insert::<TestTable>(&1, &"v3".to_string()).expect("reinsert");
+        db.insert::<TestTable>(&2, &"v2".to_string()).expect("insert");
+        db.insert::<TestTable>(&3, &"v3".to_string()).expect("insert");
+        db.sync_persist();
+
+        assert_eq!(db.get::<TestTable>(&1).unwrap(), Some("v3".to_string()));
+        assert_eq!(db.mem_db.mem_size(), 1, "no in-flight leak: the row is evictable");
     }
 
     #[test]
@@ -1696,10 +2272,6 @@ mod test {
         // Verify all items are accessible via the layered iterator
         let count = db.iter::<TestTable>().count();
         assert_eq!(count, 101, "Expected 101 items after clear+insert, got {}", count);
-
-        // Verify no items are incorrectly marked as deleted
-        let deleted_keys = db.mem_db.get_deleted_keys::<TestTable>();
-        assert!(deleted_keys.is_empty(), "Expected no deleted keys, found {}", deleted_keys.len());
     }
 
     #[test]
