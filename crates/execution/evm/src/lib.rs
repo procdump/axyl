@@ -28,6 +28,7 @@ pub use reth_transaction_pool::{
     BestTransactions, EthPooledTransaction, PoolTransaction, TransactionPool as TransactionPoolT,
 };
 
+pub mod bypass_validator;
 pub mod chainspec;
 pub mod dirs;
 pub mod payload;
@@ -36,7 +37,6 @@ pub mod txn_pool;
 pub use txn_pool::*;
 pub mod error;
 mod evm;
-pub mod in_flight;
 pub mod native_erc20;
 pub(crate) mod persistence;
 pub mod reth_env;
