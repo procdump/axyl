@@ -48,7 +48,9 @@ const IN_FLIGHT_TTL: Duration = Duration::from_secs(60);
 
 /// The most batches the builder may seal ahead of its own execution watermark while the epoch is
 /// active. Keeps the in-flight prefix within the per-authority parking budget, so a lagging batch
-/// cannot strand its successors.
+/// cannot strand its successors. Collapses to one batch until the epoch's first batch has executed
+/// (so a head whose header is rejected at a lagged boundary leaves no tail to execute out of
+/// order) and again within the quiesce window before the boundary; see `check_build_budget`.
 pub const MAX_SEAL_AHEAD: u64 = 4;
 const _: () = assert!(MAX_SEAL_AHEAD * 4 <= MAX_PARKED_PER_AUTHORITY as u64);
 
@@ -285,7 +287,17 @@ impl BatchBuilder {
         match pipeline {
             PipelineState::Clean(clean) => PipelineState::Clean(clean),
             PipelineState::Accumulating(acc) => {
-                if acc.can_start_build(executed_seq, self.config.epoch_boundary).is_err() {
+                if let Err(reason) = acc.can_start_build(executed_seq, self.config.epoch_boundary) {
+                    // Debug, not info: the gate is re-checked on every tick and candidate event
+                    // while it refuses. The reason tells the epoch-start throttle and a full
+                    // budget apart from an unexplained stall.
+                    debug!(
+                        target: "worker::batch_builder",
+                        ?reason,
+                        seq,
+                        executed_seq,
+                        "accumulating: seal-ahead gate refused to start a build"
+                    );
                     return PipelineState::Accumulating(acc);
                 }
                 interval.reset();
@@ -293,7 +305,16 @@ impl BatchBuilder {
                 PipelineState::AwaitingQuorum(acc.start_building(rx))
             }
             PipelineState::BacklogDraining(backlog) => {
-                if backlog.can_start_build(executed_seq, self.config.epoch_boundary).is_err() {
+                if let Err(reason) =
+                    backlog.can_start_build(executed_seq, self.config.epoch_boundary)
+                {
+                    debug!(
+                        target: "worker::batch_builder",
+                        ?reason,
+                        seq,
+                        executed_seq,
+                        "backlog draining: seal-ahead gate refused to start a build"
+                    );
                     return PipelineState::BacklogDraining(backlog);
                 }
                 interval.reset();
