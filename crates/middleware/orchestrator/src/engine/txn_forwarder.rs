@@ -18,7 +18,7 @@ use prometheus::{
 use rayls_consensus_worker::WorkerNetworkHandle;
 use rayls_execution_evm::{
     in_flight::{DuePolicy, ForwardMarks, ForwardProbe},
-    PoolTxn, TxPool, WorkerTxPool,
+    PoolTxn, WorkerTxPool,
 };
 use rayls_infrastructure_types::{
     fxhash_slot_digest, ring_walk, B256Set, BlsPublicKey, Bytes, ConsensusHeader,
@@ -90,7 +90,9 @@ const FORWARD_PRUNE_ATTEMPTS: u32 = 5;
 struct ForwardMetrics {
     /// Seconds spent scanning the pending pool and grouping due transactions per tick.
     scan_duration: Histogram,
-    /// Total pending transactions inspected across ticks (the scan's input size).
+    /// Total pending transactions the scan actually iterated across ticks (the scan's input size).
+    /// Counted from the iteration itself, not read back from `pool_size()`, so it cannot report
+    /// transactions the scan never saw.
     pending_examined: IntCounter,
     /// Total transactions that passed the send gate across ticks (the scan's useful output).
     forwarded: IntCounter,
@@ -118,7 +120,7 @@ impl ForwardMetrics {
             )?,
             pending_examined: register_int_counter_with_registry!(
                 "rayls_txn_forwarder_pending_examined_total",
-                "Total pending transactions inspected across forward ticks",
+                "Total pending transactions the forward scan actually iterated across ticks",
                 registry
             )?,
             forwarded: register_int_counter_with_registry!(
@@ -340,13 +342,21 @@ impl TxnForwarder {
         let mut prune_hashes: Vec<TxHash> = Vec::new();
         let committee_size = committee.len() as u64;
 
-        let best_transactions = {
-            let mut best_transactions = pool.best_transactions();
-            best_transactions.no_updates();
-            best_transactions
-        };
+        // Scan the pending sub-pool directly rather than through `best_transactions()`. The
+        // forwarder needs none of what `best` adds - fee-priority order across senders, or the
+        // unlock chain that yields a tx only after its predecessor - because it forwards every
+        // pending tx grouped by sender, and `pending_transactions()` already yields them
+        // `(sender, nonce)`-sorted (it walks the pool's `BTreeMap<TransactionId>`). What `best`
+        // costs is a dependency the forwarder cannot afford: it is seeded from the pool's separate
+        // per-sender `independent_transactions` map and can only reach a sender's run through that
+        // entry, so a run whose entry is missing is invisible to the scan while `pool_size()`, the
+        // reconcile, and `txpool_status` all still count it - its marks then sit forever, never
+        // probed, never pruned, never resent. Reading the sub-pool itself, the same view the
+        // reconcile uses, removes that split: what is counted is exactly what is scanned.
+        let pending = pool.pending_transactions();
+        let scanned = pending.len() as u64;
 
-        for txn in best_transactions {
+        for txn in pending {
             // EIP-4844 transactions are excluded for the same reason the batch builder skips them:
             // the blob sidecar does not travel with the encoded transaction, so the receiver cannot
             // pool it.
@@ -402,7 +412,7 @@ impl TxnForwarder {
             pool.remove_transactions(prune_hashes);
         }
 
-        metrics.on_scan(scan_start.elapsed(), pool.pool_size().pending as u64, forwarded, resent);
+        metrics.on_scan(scan_start.elapsed(), scanned, forwarded, resent);
         by_sender
     }
 
