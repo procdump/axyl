@@ -608,8 +608,11 @@ async fn test_canonical_notification_updates_pool() {
     assert!(pending.iter().all(|tx| txpool.is_in_flight(tx.hash())));
 }
 
-/// The builder seals up to `MAX_SEAL_AHEAD` batches ahead of its own execution watermark, then
-/// stalls until execution advances, so a lagging proposer cannot outrun the parking budget.
+/// The builder seals its first batch of the epoch and then nothing more until that batch has
+/// executed (the epoch-start throttle, so a head rejected at a lagged boundary leaves no tail to
+/// execute out of order); once it has, the builder seals up to `MAX_SEAL_AHEAD` batches ahead of
+/// its own execution watermark and stalls until execution advances, so a lagging proposer cannot
+/// outrun the parking budget.
 #[tokio::test]
 async fn builder_stalls_at_the_seal_ahead_budget_until_the_watermark_advances() {
     let genesis = test_genesis();
@@ -628,7 +631,9 @@ async fn builder_stalls_at_the_seal_ahead_budget_until_the_watermark_advances() 
     // sequence by exactly one, making the budget observable batch by batch.
     let per_tx_gas = 30_000;
     let mut tx_factory = TransactionFactory::new();
-    for _ in 0..5 {
+    // Six: the head (seq 10), MAX_SEAL_AHEAD ahead of it once it executes (11..=14), and one
+    // more for the slot a further watermark advance reopens (15).
+    for _ in 0..6 {
         let tx = tx_factory.create_eip1559(
             chain.clone(),
             Some(per_tx_gas),
@@ -639,7 +644,7 @@ async fn builder_stalls_at_the_seal_ahead_budget_until_the_watermark_advances() 
         );
         let _ = tx_factory.submit_tx_to_pool(tx, txpool.clone()).await;
     }
-    assert_eq!(txpool.pool_size().pending, 5);
+    assert_eq!(txpool.pool_size().pending, 6);
 
     let (to_worker, mut from_batch_builder) = tokio::sync::mpsc::channel(2);
     // Resume at seq 10 with execution reported through seq 9, so the seal-ahead budget starts
@@ -664,13 +669,30 @@ async fn builder_stalls_at_the_seal_ahead_budget_until_the_watermark_advances() 
     );
     let _builder = tokio::spawn(batch_builder.run());
 
-    // The builder seals exactly MAX_SEAL_AHEAD batches while execution stays at seq 9.
-    for _ in 0..rayls_batch_builder::MAX_SEAL_AHEAD {
-        let (_batch, _sender_nonce_ranges, ack) =
+    // Epoch-start throttle: the head (seq 10) seals, then nothing more while execution is still
+    // at 9 - the Active budget of MAX_SEAL_AHEAD does not apply until the head has executed.
+    let (head, _sender_nonce_ranges, ack) =
+        timeout(Duration::from_secs(5), from_batch_builder.recv())
+            .await
+            .expect("the epoch's head batch seals")
+            .expect("batch channel open");
+    assert_eq!(head.batch.seq, 10);
+    let _ = ack.send(Ok(()));
+    assert!(
+        timeout(Duration::from_millis(500), from_batch_builder.recv()).await.is_err(),
+        "builder must not seal ahead of an unexecuted epoch head"
+    );
+
+    // The head executes: the throttle lifts and the builder seals exactly MAX_SEAL_AHEAD batches
+    // ahead of execution (11..=14).
+    wm_tx.send(Some(10)).unwrap();
+    for expected_seq in 11..=(10 + rayls_batch_builder::MAX_SEAL_AHEAD) {
+        let (batch, _sender_nonce_ranges, ack) =
             timeout(Duration::from_secs(5), from_batch_builder.recv())
                 .await
                 .expect("batch sealed ahead of execution")
                 .expect("batch channel open");
+        assert_eq!(batch.batch.seq, expected_seq);
         let _ = ack.send(Ok(()));
     }
 
@@ -681,12 +703,13 @@ async fn builder_stalls_at_the_seal_ahead_budget_until_the_watermark_advances() 
     );
 
     // Execution advances one sequence, reopening exactly one slot in the budget.
-    wm_tx.send(Some(10)).unwrap();
-    let (_batch, _sender_nonce_ranges, ack) =
+    wm_tx.send(Some(11)).unwrap();
+    let (next, _sender_nonce_ranges, ack) =
         timeout(Duration::from_secs(5), from_batch_builder.recv())
             .await
             .expect("watermark advance unblocks the next batch")
             .expect("batch channel open");
+    assert_eq!(next.batch.seq, 15);
     let _ = ack.send(Ok(()));
 }
 

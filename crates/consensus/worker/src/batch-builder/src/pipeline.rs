@@ -97,6 +97,10 @@ pub enum GateRejectionReason {
     EpochBoundaryReached,
     /// The seal-ahead budget is already full; wait for execution to catch up.
     BudgetExhausted,
+    /// The builder's first batch of this epoch has not executed yet, so only that one batch may be
+    /// outstanding: sealing ahead of an unexecuted head is what lets a tail execute out of order
+    /// when the head's header is rejected at a lagged boundary.
+    EpochStartThrottled,
 }
 
 /// The resolution of a spawned build-and-seal task.
@@ -436,7 +440,19 @@ impl PipelineState {
     }
 }
 
-/// Refuses a build past the boundary or once the phase's seal-ahead budget is full.
+/// Refuses a build past the boundary, once the phase's seal-ahead budget is full, or while the
+/// epoch's first batch is still unexecuted.
+///
+/// The epoch-start rule: until execution has reached `start_seq` (this builder's first seq of the
+/// epoch), at most one batch may be outstanding. Execution forgets every authority's seq frame at
+/// the boundary and accepts whatever batch an authority commits first in the new epoch. If this
+/// builder has sealed ahead and its head batch's header is rejected as wrong-epoch - this node
+/// lagged the boundary - a seal-ahead tail commits first, is accepted in the head's place, and
+/// every one of its txs drops nonce-too-high; the head lands later, the dropped txs re-seal after
+/// their in-flight TTL, and the epoch's early sealing is wasted for minutes. With nothing sealed
+/// ahead of the head there is no tail to reorder. The cost is one commit round-trip of builder
+/// idle time per epoch (and per mid-epoch restart, since `start_seq` resumes at `executed + 1`).
+/// Local pacing only, nothing replicated, so it needs no activation.
 #[inline]
 fn check_build_budget(
     data: &PipelineData,
@@ -453,6 +469,12 @@ fn check_build_budget(
         data.start_seq,
         own_executed_seq,
     );
+
+    let first_of_epoch_executed =
+        own_executed_seq.is_some_and(|executed| executed >= data.start_seq);
+    if !first_of_epoch_executed && in_flight >= 1 {
+        return Err(GateRejectionReason::EpochStartThrottled);
+    }
 
     if in_flight >= phase.max_allowed_ahead() {
         return Err(GateRejectionReason::BudgetExhausted);

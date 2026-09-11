@@ -68,6 +68,67 @@ fn can_start_build_refuses_past_the_boundary() {
 }
 
 #[test]
+fn can_start_build_throttles_to_one_batch_until_the_epochs_first_batch_executes() {
+    // The lagged-boundary reorder needs a seal-ahead tail to exist while the head is still
+    // unexecuted. Resume at seq 10 with execution reported through 9 (the previous epoch's last):
+    // the head (10) may seal, but nothing may seal ahead of it until execution reaches it.
+    let far_boundary = u64::MAX;
+
+    // nothing sealed yet: the head itself may start
+    let fresh = BatchPipeline::<Clean>::new(None, 10, 0).on_event();
+    assert_eq!(fresh.can_start_build(Some(9), far_boundary), Ok(()));
+
+    // head sealed (depth 1), execution still at 9: throttled, even though the Active budget is 4
+    let head_out = BatchPipeline::<Clean>::new(Some(10), 10, 0).on_event();
+    assert_eq!(
+        head_out.can_start_build(Some(9), far_boundary),
+        Err(GateRejectionReason::EpochStartThrottled)
+    );
+    // no watermark at all (genesis) is the same: the floor is start_seq - 1, still unexecuted
+    assert_eq!(
+        head_out.can_start_build(None, far_boundary),
+        Err(GateRejectionReason::EpochStartThrottled)
+    );
+
+    // the head executed: the throttle lifts and the ordinary budget applies again
+    assert_eq!(head_out.can_start_build(Some(10), far_boundary), Ok(()));
+    // three ahead of the executed head is under the Active budget of four
+    let three_ahead = BatchPipeline::<Clean>::new(Some(13), 10, 0).on_event();
+    assert_eq!(three_ahead.can_start_build(Some(10), far_boundary), Ok(()));
+    // four ahead fills it, and the reason is now the budget, not the throttle
+    let four_ahead = BatchPipeline::<Clean>::new(Some(14), 10, 0).on_event();
+    assert_eq!(
+        four_ahead.can_start_build(Some(10), far_boundary),
+        Err(GateRejectionReason::BudgetExhausted)
+    );
+}
+
+#[test]
+fn epoch_start_throttle_yields_to_the_boundary_and_quiesce_rules() {
+    // Closed still wins over everything; Quiescing's budget of one coincides with the throttle, so
+    // the reason reported is the throttle's while the head is unexecuted and the budget's after.
+    let boundary = 100;
+    let quiescing_tip = boundary - BOUNDARY_QUIESCE_WINDOW_SECS;
+
+    let at_boundary = BatchPipeline::<Clean>::new(Some(10), 10, boundary).on_event();
+    assert_eq!(
+        at_boundary.can_start_build(Some(9), boundary),
+        Err(GateRejectionReason::EpochBoundaryReached)
+    );
+
+    let quiescing = BatchPipeline::<Clean>::new(Some(10), 10, quiescing_tip).on_event();
+    assert_eq!(
+        quiescing.can_start_build(Some(9), boundary),
+        Err(GateRejectionReason::EpochStartThrottled)
+    );
+    let quiescing_ahead = BatchPipeline::<Clean>::new(Some(11), 10, quiescing_tip).on_event();
+    assert_eq!(
+        quiescing_ahead.can_start_build(Some(10), boundary),
+        Err(GateRejectionReason::BudgetExhausted)
+    );
+}
+
+#[test]
 fn clean_closes_when_the_tip_reaches_the_boundary() {
     let boundary = 100;
     let below = BatchPipeline::<Clean>::new(None, 1, boundary - 1);
