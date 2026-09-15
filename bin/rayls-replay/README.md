@@ -83,10 +83,13 @@ sequenceDiagram
    consistent before it is trusted as the oracle. Each replayed boundary block is
    then checked against its committed anchor.
 
-6. **Rewards** (`rewards.rs`). Close-epoch blocks are rebuilt with the snapshot's
-   committed leader tally, read from that block's withdrawals and staged into a
-   snapshot-backed `RewardsBackend`. The archive env never recomputes rewards from
-   consensus.
+6. **Rewards** (`rewards.rs`). Pre-`HybridRewards` close-epoch blocks are rebuilt
+   with the snapshot's committed leader tally, read from that block's withdrawals
+   and staged into a snapshot-backed `RewardsBackend`. Post-fork close blocks need
+   per-validator participation rounds, which a block does not preserve; those are
+   recomputed with the live node's `ConsensusBlocks` walk over the snapshot's
+   consensus DB and held to the block's withdrawals (leader rounds must agree, or
+   the replay aborts as a consensus/execution divergence).
 
 ## Usage
 

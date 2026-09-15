@@ -8273,6 +8273,7 @@ dependencies = [
  "rayls-infrastructure-config",
  "rayls-infrastructure-storage",
  "rayls-infrastructure-types",
+ "rayls-middleware-rewards",
  "reth-chainspec",
  "serde_yaml",
  "thiserror 1.0.69",
