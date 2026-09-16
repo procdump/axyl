@@ -162,6 +162,15 @@ where
             // relay reservations keeps running but never re-establishes the direct listener
             // (pre-existing behavior restored it via fatal-exit-and-restart); no shipped
             // topology mixes them today.
+            //
+            // `is_empty()` deliberately tests DESIRED reservations, not active ones. Values are
+            // `Some(id)` while a reservation is live and `None` while it is down, and with zero
+            // listeners every value is necessarily `None` -- so a non-empty, all-`None` map is
+            // not an edge case here, it is exactly the retryable state this branch waits out.
+            // Testing `.values().any(Option::is_some)` instead would be false in this branch,
+            // making an all-relays-down window fatal and turning the retry path into dead code.
+            // (The active-reservation predicate is the right one elsewhere, e.g. the
+            // direct-connection-on-a-relayed-node warning in `process_event`.)
             if self.relay_reservations.is_empty() {
                 error!(target: "network", ?addresses, "no listeners for swarm - network shutting down");
                 return Err(NetworkError::AllListenersClosed);
