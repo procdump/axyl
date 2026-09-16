@@ -11,8 +11,9 @@ use rayls_infrastructure_storage::open_db;
 use rayls_infrastructure_types::{
     rewards::RewardsCounter, Address, Genesis, RaylsNetwork, TaskManager,
 };
+use rayls_middleware_rewards::ConsensusRewardsCounter;
 use rayls_replay::{
-    rewards::{SnapshotRewardsBackend, SnapshotTallyStore},
+    rewards::{HybridTallySource, SnapshotRewardsBackend, SnapshotTallyStore},
     run_replay, verify_chainspec_compatibility, ReplayConfig,
 };
 use reth_chainspec::ChainSpec as RethChainSpec;
@@ -168,8 +169,12 @@ async fn run(cli: Cli) -> eyre::Result<()> {
 
     // archive blocks build with the snapshot's committed close-epoch tally,
     // staged into `tally_store` per close block; snapshot env never builds.
+    // Hybrid-reward epochs also need the consensus-DB walk, attached to
+    // `hybrid_source` once the consensus DB is open below.
     let tally_store = SnapshotTallyStore::default();
-    let archive_rewards = SnapshotRewardsBackend::new(tally_store.clone()).into_counter();
+    let hybrid_source = HybridTallySource::default();
+    let archive_rewards =
+        SnapshotRewardsBackend::new(tally_store.clone(), hybrid_source.clone()).into_counter();
 
     let snapshot_task_manager = TaskManager::default();
     let archive_task_manager = TaskManager::default();
@@ -222,6 +227,17 @@ async fn run(cli: Cli) -> eyre::Result<()> {
     // maintenance modes).
     let consensus_store = open_db(&consensus_db);
 
+    // hybrid-reward close blocks recompute participation rounds with the same
+    // ConsensusBlocks walk the live node runs, over the snapshot's consensus DB.
+    // ORDERING: this attach must precede `run_replay` below, whose first
+    // `install_committee_from_contract` forwards the committee to the walker;
+    // `set_committee` only reaches a walker that is already attached.
+    if !hybrid_source
+        .attach(RewardsCounter::from_impl(ConsensusRewardsCounter::new(consensus_store.clone())))
+    {
+        return Err(eyre!("hybrid tally source attached twice"));
+    }
+
     let snapshot_evm = RethEnv::new_for_archive_replay(
         Arc::clone(&base_chain),
         &cli.snapshot_datadir,
@@ -251,6 +267,8 @@ async fn run(cli: Cli) -> eyre::Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     spawn_shutdown_listener(shutdown_tx);
 
+    // requires `hybrid_source.attach(...)` above to have run: the committee installed
+    // here (and after every close block) must reach the hybrid walker
     let last = run_replay(
         &snapshot_evm,
         &consensus_store,
