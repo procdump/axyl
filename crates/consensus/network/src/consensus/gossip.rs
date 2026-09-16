@@ -109,18 +109,23 @@ where
             }
             GossipEvent::GossipsubNotSupported { peer_id } => {
                 // `GossipsubNotSupported` is authoritative: gossipsub negotiated with this peer and
-                // it runs none of our gossip protocols. Every consensus validator runs gossipsub,
-                // so such a peer is not a consensus participant -- in this network, a circuit
-                // relay. Fatally banning it (the previous behavior) also severs
-                // every circuit routed through it, stranding a relayed node from
-                // the committee. Record it as relay infrastructure instead
-                // (penalty-exempt, kept out of kad) and drop it from the DHT.
+                // it runs none of our gossip protocols. Fatally banning it (the original behavior)
+                // severed every circuit routed through a relay, stranding relayed nodes -- so we
+                // must not ban. But "no gossipsub" is NOT proof of being a relay: from a bare peer
+                // id a relay is indistinguishable from a misconfigured or hostile peer, so this
+                // signal must not confer relay-infrastructure privilege either (that would let any
+                // peer opt out of the ban system by simply not speaking gossipsub). The only thing
+                // waived here is the gossip penalty itself; the peer remains subject to every
+                // other penalty and to pruning. Genuine relays are protected separately, by
+                // construction, via `register_relays_from_addrs` (the hop of every circuit we
+                // reserve on or dial through) -- a relay reaching here unregistered is one we do
+                // not depend on. Keep it out of the DHT so it is never propagated as a peer.
                 // A committee validator reaching here is a real protocol/version fault -- surface
-                // it loudly rather than exempting.
-                if self.swarm.behaviour_mut().peer_manager.mark_relay_peer(peer_id) {
+                // it loudly rather than reclassifying it.
+                if self.swarm.behaviour().peer_manager.should_skip_gossip_penalty(&peer_id) {
                     // stop treating it as a DHT peer (mirrors the kad cleanup the ban path did)
                     self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
-                    info!(target: "network", ?peer_id, "peer does not support gossipsub - treating as relay infrastructure (penalty-exempt)");
+                    info!(target: "network", ?peer_id, "peer does not support gossipsub - waiving gossip penalty and keeping it out of kad (not exempt from other penalties or pruning)");
                 } else {
                     warn!(target: "network", ?peer_id, "committee member does not support gossipsub - possible protocol/version mismatch");
                 }
