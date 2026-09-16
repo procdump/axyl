@@ -753,22 +753,56 @@ async fn test_admitted_connection_is_registered_under_the_same_ban_predicate() {
     );
 }
 
-/// A peer recorded as a relay via `mark_relay_peer` (the `GossipsubNotSupported` path) must be
-/// exempt from consensus-layer penalties: a `Fatal` penalty must neither ban nor disconnect it.
-/// Regression for relayed nodes banning the very relays their circuits ride on.
+/// "Does not speak gossipsub" (the `GossipsubNotSupported` path) confers NO privilege: from a bare
+/// peer id a relay is indistinguishable from a hostile or misconfigured peer, so noting one must
+/// waive only the gossip penalty -- it must NOT make the peer relay infrastructure. A `Fatal`
+/// penalty (some other misbehavior) must still ban it. This is the inverse of the earlier
+/// behavior, which let any non-gossip peer opt out of the ban system.
 #[tokio::test]
-async fn test_mark_relay_peer_exempts_from_ban() {
+async fn test_non_gossip_peer_not_exempt_from_ban() {
     let mut peer_manager = create_test_peer_manager(None);
-    let relay = register_peer(&mut peer_manager, None); // random peer id -> not a validator
+    let peer = register_peer(&mut peer_manager, None); // random peer id -> not a validator
 
-    // record it as relay infrastructure, as the GossipsubNotSupported handler does
+    // the GossipsubNotSupported handler may waive the gossip penalty for a non-validator
     assert!(
-        peer_manager.mark_relay_peer(relay),
-        "a non-validator peer must be recordable as relay"
+        peer_manager.should_skip_gossip_penalty(&peer),
+        "a non-validator peer's gossip penalty may be waived"
     );
-    assert!(peer_manager.is_relay(&relay));
+    // waiving must NOT promote it to protected relay infrastructure
+    assert!(!peer_manager.is_relay(&peer), "a non-gossip peer must not become a relay");
 
-    // a fatal penalty must now be a no-op: no ban, no disconnect
+    // a fatal penalty must still take effect: the peer is disconnected and banned (the ban path
+    // surfaces as a `DisconnectPeer` event, as in `test_process_penalty_fatal`)
+    peer_manager.process_penalty(peer, Penalty::Fatal);
+    let events = collect_all_events(&mut peer_manager);
+    let disconnects = extract_events(&events, |e| matches!(e, PeerEvent::DisconnectPeer(_)));
+    assert!(
+        matches!(disconnects.first(), Some(PeerEvent::DisconnectPeer(id)) if *id == peer),
+        "a non-gossip peer must still be disconnected by a consensus-layer fatal penalty"
+    );
+    assert!(peer_manager.peer_banned(&peer), "non-gossip peer must be banned");
+}
+
+/// Relay protection is granted by construction, from the hop of a `/p2p-circuit` we use
+/// (`register_relays_from_addrs` -- fed by `StartListening` for every relay we reserve on and by
+/// a peer's advertised circuit address for every relay we dial through). A relay registered this
+/// way is exempt from consensus-layer penalties: a `Fatal` penalty must neither ban nor disconnect
+/// it. Regression for relayed nodes banning the very relays their circuits ride on.
+#[tokio::test]
+async fn test_register_relays_from_circuit_addr_exempts_hop() {
+    let mut peer_manager = create_test_peer_manager(None);
+    let relay = PeerId::random();
+    let dst = PeerId::random();
+    let circuit: Multiaddr =
+        format!("/ip4/127.0.0.1/udp/50000/quic-v1/p2p/{relay}/p2p-circuit/p2p/{dst}")
+            .parse()
+            .expect("valid circuit multiaddr");
+
+    peer_manager.register_relays_from_addrs(std::slice::from_ref(&circuit));
+    assert!(peer_manager.is_relay(&relay), "the circuit's hop must be registered as a relay");
+    assert!(!peer_manager.is_relay(&dst), "the circuit's destination is a peer, not a relay");
+
+    // a fatal penalty on the hop must be a no-op: no ban, no disconnect
     peer_manager.process_penalty(relay, Penalty::Fatal);
     let events = collect_all_events(&mut peer_manager);
     assert!(
@@ -777,15 +811,15 @@ async fn test_mark_relay_peer_exempts_from_ban() {
             PeerEvent::Banned(_) | PeerEvent::DisconnectPeer(_) | PeerEvent::DisconnectPeerX(_, _)
         ))
         .is_empty(),
-        "a relay peer must not be banned or disconnected by a consensus-layer penalty"
+        "a registered relay must not be banned or disconnected by a consensus-layer penalty"
     );
-    assert!(!peer_manager.peer_banned(&relay), "relay peer must not be banned");
+    assert!(!peer_manager.peer_banned(&relay), "registered relay must not be banned");
 }
 
-/// `mark_relay_peer` must refuse to record a committee validator as a relay: a validator that
-/// fails gossipsub negotiation is a real protocol/version fault, not infrastructure to exempt.
+/// `should_skip_gossip_penalty` must refuse a committee validator: a validator that fails gossipsub
+/// negotiation is a real protocol/version fault to surface, not a peer to quietly reclassify.
 #[tokio::test]
-async fn test_mark_relay_peer_refuses_validator() {
+async fn test_should_skip_gossip_penalty_refuses_validator() {
     let all_nodes = CommitteeFixture::builder(MemDatabase::default).build();
     let mut authorities = all_nodes.authorities();
     let authority_1 = authorities.next().expect("first authority");
@@ -807,8 +841,8 @@ async fn test_mark_relay_peer_refuses_validator() {
     // sanity: the derived peer id is recognized as a committee validator
     assert!(peer_manager.is_peer_validator(&validator_peer_id));
 
-    // the guard: a validator is never recorded as a relay
-    assert!(!peer_manager.mark_relay_peer(validator_peer_id));
+    // the guard: a validator's gossip penalty is never waived, and it never becomes a relay
+    assert!(!peer_manager.should_skip_gossip_penalty(&validator_peer_id));
     assert!(!peer_manager.is_relay(&validator_peer_id));
 }
 

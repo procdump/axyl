@@ -499,25 +499,30 @@ impl PeerManager {
         self.relay_peers.contains(peer_id)
     }
 
-    /// Record a peer that completed connection setup but does not speak a consensus protocol
-    /// (learned authoritatively, e.g. gossipsub's `GossipsubNotSupported`) as protected
-    /// infrastructure. In this network a peer that runs none of our consensus protocols is a
-    /// circuit relay, so record it the same way as a relay named in a `/p2p-circuit` address:
-    /// exempt from penalties and kept out of the kademlia DHT. This is the discovery-independent
-    /// counterpart to [`Self::register_relays_from_addrs`]; it catches relays we only ever saw via
-    /// a bare direct address (a kad/identify leak), which the address-based path cannot.
+    /// Whether the gossip penalty may be skipped for a peer that completed connection setup but
+    /// runs none of our gossip protocols (learned authoritatively from gossipsub's
+    /// `GossipsubNotSupported`).
     ///
-    /// Returns `false` without recording when `peer_id` is a known committee validator: a
-    /// validator that fails consensus-protocol negotiation is a real protocol/version fault the
-    /// caller must surface, never silently exempt.
-    pub(crate) fn mark_relay_peer(&mut self, peer_id: PeerId) -> bool {
-        if self.is_peer_validator(&peer_id) {
-            return false;
-        }
-        if self.relay_peers.insert(peer_id) {
-            debug!(target: "peer-manager", ?peer_id, "recorded non-consensus peer as relay (exempt from penalties)");
-        }
-        true
+    /// Skipping it deliberately confers NO privilege. "Does not speak gossipsub" is not proof of
+    /// being a relay -- from a bare peer id there is no way to tell a relay from a misconfigured or
+    /// hostile peer -- so the only thing the caller may skip on this signal is the *gossip* penalty
+    /// (the one such a peer would have tripped anyway). The peer stays subject to every other
+    /// penalty and to pruning. Relay-infrastructure protection (penalty- and prune-exempt,
+    /// kad-skipped) is granted only by [`Self::register_relays_from_addrs`], i.e. to the hop of
+    /// a `/p2p-circuit` we actually use: every relay we reserve on is registered at
+    /// `StartListening`, and every relay we dial a peer through is registered from that peer's
+    /// advertised circuit address. A relay reaching here *without* being registered is one we
+    /// do not depend on (typically one dialed via a leaked bare address), so leaving it
+    /// unprotected costs nothing.
+    ///
+    /// Returns `false` when `peer_id` is a known committee validator: a validator that fails
+    /// gossipsub negotiation is a real protocol/version fault the caller must surface, never a
+    /// peer to be quietly reclassified.
+    ///
+    /// Deliberately stateless: any peer id can trigger `GossipsubNotSupported`, so remembering
+    /// them would be an unbounded, attacker-fillable set for no benefit (nothing branches on it).
+    pub(crate) fn should_skip_gossip_penalty(&self, peer_id: &PeerId) -> bool {
+        !self.is_peer_validator(peer_id)
     }
 
     /// Record the relay servers referenced by any `/p2p-circuit` addresses so they are treated as
