@@ -344,7 +344,12 @@ where
     /// Each relay yields `<relay>/p2p-circuit/p2p/<self>`, so the node reserves on *every* listed
     /// relay in addition to the one in its node-info. That is what makes a node survive losing a
     /// relay: the remaining reservations keep it reachable (and keep the swarm's listeners alive).
-    /// Returns an empty vec when the env var is unset.
+    /// Returns an empty vec when the env var is unset (the normal case for a node that does not
+    /// reserve via env: a direct validator, an observer, or a node whose advertised circuit is its
+    /// only reservation). An env var that is SET but yields no addresses (blank, or only
+    /// separators/whitespace -- typically a typo or an empty shell expansion) is never intentional,
+    /// so it is warned about: the node will make no env-driven reservations. Whether that leaves
+    /// it with no listener at all is decided by the mode-aware caller, `start_swarm_listeners`.
     pub(super) fn relay_listen_addresses(
         env_var: &str,
         network_pubkey: NetworkPublicKey,
@@ -365,6 +370,14 @@ where
                 eyre::eyre!("relay multiaddr from {env_var} ({entry}) has a conflicting P2P id")
             })?;
             addrs.push(listen);
+        }
+        if addrs.is_empty() {
+            warn!(
+                target: "epoch-manager",
+                %env_var,
+                value = %list,
+                "relay env var is set but yielded no relay addresses; no env-driven relay reservations will be made (typo or empty shell expansion?)"
+            );
         }
         Ok(addrs)
     }
@@ -389,6 +402,17 @@ where
     Res: RLMessage,
 {
     if is_dnsaddr(&advertised) {
+        // A /dnsaddr is advertise-only, so the explicit reservations are this node's ONLY
+        // listeners. With none, the node would start with zero listeners -- unreachable, and
+        // silently so (only a log). Fail fast instead, naming the env var to fix; this is the
+        // /dnsaddr counterpart of the identity-only guard in `parse_listener_address_for_swarm`.
+        if reservations.is_empty() {
+            return Err(eyre::eyre!(
+                "advertised address {advertised} is advertise-only (/dnsaddr) and {reservations_env} \
+                 supplied no relay reservations: the node would have no listener at all. Set \
+                 {reservations_env} to the relay circuit(s) to reserve on (comma-separated)"
+            ));
+        }
         info!(target: "epoch-manager", ?advertised, "advertise-only /dnsaddr address; reserving via {reservations_env}");
     } else if advertised_relay_covered(&advertised, &reservations) {
         info!(target: "epoch-manager", ?advertised, "advertised relay covered by {reservations_env}; reserving on the explicit address only");
