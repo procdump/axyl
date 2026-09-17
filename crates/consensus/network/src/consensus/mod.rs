@@ -140,7 +140,7 @@ where
     /// audit trail proving a relayed-only node exchanges consensus messages exclusively through
     /// its relays.
     connection_paths: HashMap<ConnectionId, ConnectionPath>,
-    /// Resolver for `/dnsaddr` committee peers, used to discover (and exempt) the relays a node
-    /// dials through -- so the relay set is learned from DNS rather than configured.
+    /// Resolver for `/dnsaddr` committee peers, used to discover (and prune-protect) the relays a
+    /// node dials through -- so the relay set is learned from DNS rather than configured.
     relay_resolver: hickory_resolver::TokioResolver,
 }

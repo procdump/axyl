@@ -33,7 +33,7 @@ where
             }
             NetworkCommand::StartListening { multiaddr, reply } => {
                 // When listening on a relay circuit (a node may reserve on several relays for
-                // failover), protect that relay from banning/pruning so we don't tear down our own
+                // failover), protect that relay from pruning so we don't tear down our own
                 // reservation. No-op for direct (non-circuit) listen addresses.
                 self.swarm
                     .behaviour_mut()
@@ -81,9 +81,9 @@ where
                 let mut dnsaddrs = Vec::new();
                 let pm = &mut self.swarm.behaviour_mut().peer_manager;
                 for (bls, info) in peers {
-                    // Collect /dnsaddr advertise addresses so we can resolve them below and exempt
-                    // the relays they're reached through (their committee address carries no
-                    // circuit, so `add_known_peer` alone can't learn those relays).
+                    // Collect /dnsaddr advertise addresses so we can resolve them below and
+                    // register the relays they're reached through (their committee address carries
+                    // no circuit, so `add_known_peer` alone can't learn those relays).
                     if crate::types::is_dnsaddr(&info.network_address) {
                         dnsaddrs.push(info.network_address.clone());
                     }
@@ -96,16 +96,17 @@ where
                         },
                     );
                 }
-                // Resolve /dnsaddr peers and register the relays we dial through as protected.
+                // Resolve /dnsaddr peers and register the relays we dial through (prune-exempt,
+                // kept out of kad).
                 //
                 // This MUST NOT run on the swarm loop: `txt_lookup().await` blocks the loop for as
                 // long as the resolver takes, and while blocked the swarm cannot service relayed
                 // (yamux-over-circuit) connections -- which, unlike direct QUIC, have no
                 // transport-level keep-alive -- so peers reset them and consensus connectivity
                 // churns. Instead resolve in a detached task and hand the results back via
-                // `RegisterRelays`, which registers cheaply on the loop. The exemption may land
-                // slightly after the first dials; that's fine (relays aren't banned instantly and
-                // penalties decay), and it's far better than stalling the loop.
+                // `RegisterRelays`, which registers cheaply on the loop. The registration may land
+                // slightly after the first dials; that's fine (pruning only runs on excess peers at
+                // heartbeat), and it's far better than stalling the loop.
                 if !dnsaddrs.is_empty() {
                     let resolver = self.relay_resolver.clone();
                     let handle = self.handle.clone();
@@ -119,8 +120,8 @@ where
                 let _ = reply.send(Ok(()));
             }
             NetworkCommand::RegisterRelays { circuits } => {
-                // Cheap, non-blocking: just records relay peer ids as protected. Sent by the
-                // off-loop `/dnsaddr` discovery task spawned in `AddBootstrapPeers`.
+                // Cheap, non-blocking: just records relay peer ids (prune-exempt, kept out of kad).
+                // Sent by the off-loop `/dnsaddr` discovery task spawned in `AddBootstrapPeers`.
                 self.swarm.behaviour_mut().peer_manager.register_relays_from_addrs(&circuits);
             }
             NetworkCommand::Dial { peer_id, peer_addr, reply } => {

@@ -146,10 +146,10 @@ where
         // DNS resolver used by the transport for /dns4 & /dnsaddr resolution.
         let (resolver_cfg, resolver_opts) = dns_resolver_config()?;
         // A standalone resolver with the same config, used to resolve committee `/dnsaddr` peers at
-        // ingest so we can learn (and exempt) the relays we dial through -- configless: the relay
-        // set is discovered from DNS, not passed in. See `discover_and_register_relays`. Idle
-        // unless a `/dnsaddr` address is actually ingested, so direct/`--relay` setups are
-        // unaffected.
+        // ingest so we can learn (and prune-protect) the relays we dial through -- configless: the
+        // relay set is discovered from DNS, not passed in. See
+        // `discover_and_register_relays`. Idle unless a `/dnsaddr` address is actually
+        // ingested, so direct/`--relay` setups are unaffected.
         let relay_resolver = hickory_resolver::TokioResolver::builder_with_config(
             resolver_cfg.clone(),
             hickory_resolver::name_server::TokioConnectionProvider::default(),

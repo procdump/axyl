@@ -388,7 +388,8 @@ where
     /// relayed (yamux-over-circuit) connections, which have no transport-level keep-alive and get
     /// reset by peers. Registration itself is cheap and runs on the loop. Fire-and-forget.
     RegisterRelays {
-        /// Circuit multiaddrs whose `/p2p/<relay>` peer ids should be exempted from banning.
+        /// Circuit multiaddrs whose `/p2p/<relay>` peer ids should be registered as relays
+        /// (prune-exempt, kept out of kad; penalties still apply).
         circuits: Vec<Multiaddr>,
     },
     /// Dial a peer to establish a connection.

@@ -9,7 +9,7 @@ into the mpsc channel drained by `crates/consensus/network/src/consensus/runtime
 | # | Command | Issued by | Purpose | Fires another command? |
 |---|---------|-----------|---------|------------------------|
 | 1 | `AddBootstrapPeers` | orchestrator | register committee bootstrap servers (bls → `P2pNode`) | **Yes** → if any addr is `/dnsaddr`, spawns off-loop `dnsaddr-relay-discovery` → `RegisterRelays` (command.rs:112) |
-| 2 | `RegisterRelays` | the discovery task (async) | exempt resolved relay peer-ids from banning | No (terminal; on-loop, fire-and-forget) |
+| 2 | `RegisterRelays` | the discovery task (async) | register resolved relay peer-ids (prune-exempt, kept out of kad; penalties still apply) | No (terminal; on-loop, fire-and-forget) |
 | 3 | `NewEpoch` | orchestrator | set the epoch's committee on the behaviour | No |
 | 4 | `StartListening` (×N, **initial epoch only**) | orchestrator via `start_swarm_listeners` | bind the advertised address + one per relay reservation | No (reservation retries are timer-driven in `runtime.rs`, not commands) |
 | 5 | `DialBls` (per other committee member) | orchestrator (`dial_peer_bls`) | connect to each committee peer by bls key | **Yes** → if the peer's addr is `/dnsaddr`, spawns `dial-resolve-dnsaddr` → `DialResolved` (command.rs:162) |
