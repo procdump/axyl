@@ -88,9 +88,12 @@ pub(crate) struct PeerManager {
     /// Circuit-relay-v2 servers referenced by peers' `/p2p-circuit` addresses.
     ///
     /// Relays only speak the circuit protocol, not the consensus protocols (gossipsub, kad,
-    /// req/res), so ordinary peer scoring would immediately ban them and tear down the reservation
-    /// and every circuit routed through them. These peer ids are therefore exempt from penalties
-    /// and pruning.
+    /// req/res). The direct leg to a relay carries this node's reservation and every circuit
+    /// routed through it, so these peer ids are exempt from *pruning* and kept out of kad. They
+    /// are NOT exempt from penalties: no remaining penalty fires for merely lacking a protocol
+    /// (`GossipsubNotSupported` is penalty-free), so anything that does score a relay is
+    /// behaviour -- authoring gossip, sending requests, delivering kad records -- that a relay
+    /// never exhibits, and it is banned like any other peer.
     relay_peers: HashSet<PeerId>,
     /// This node's own peer id.
     ///
@@ -168,7 +171,7 @@ impl PeerManager {
         reply: Option<oneshot::Sender<NetworkResult<()>>>,
     ) {
         // A circuit dial rides on a direct leg to the relay named in the address; learn that
-        // relay before the leg comes up so it is penalty-exempt and classified as a relay
+        // relay before the leg comes up so it is prune-exempt and classified as a relay
         // connection. Dials resolved at dial time (e.g. `/dnsaddr` failover) may name a relay no
         // earlier ingestion path has seen. No-op for non-circuit addresses.
         self.register_relays_from_addrs(&multiaddrs);
@@ -473,14 +476,11 @@ impl PeerManager {
     /// Some reports are propagated to libp2p network layer. Caller is responsible
     /// for specifying the severity of the penalty to apply.
     pub(crate) fn process_penalty(&mut self, peer_id: PeerId, penalty: Penalty) {
-        // Relays only speak the circuit protocol, so consensus-layer penalties (e.g. kad/gossip
-        // "unsupported protocol") must never ban them - that would drop the reservation and all
-        // circuits routed through the relay.
-        if self.relay_peers.contains(&peer_id) {
-            trace!(target: "peer-manager", ?peer_id, ?penalty, "ignoring penalty for relay peer");
-            return;
-        }
-
+        // Deliberately no carve-out for `relay_peers`: penalties are behaviour-based. A relay is
+        // never scored for merely lacking gossip/kad/req-res (`GossipsubNotSupported` carries no
+        // penalty), so a relay that does get here did something a relay never does and is banned
+        // like any other peer. Banning a relay drops the reservation and all circuits through it,
+        // hence the `warn` below naming the trigger.
         let action = self.peers.process_penalty(&peer_id, penalty);
 
         // Surface the penalty that tipped a peer into a ban. Emitted at warn (not trace, like the
@@ -493,8 +493,9 @@ impl PeerManager {
         self.apply_peer_action(peer_id, action);
     }
 
-    /// Whether `peer_id` is a known relay server. Relays are exempt from penalties/pruning and are
-    /// kept out of the kademlia DHT (they only speak the circuit protocol).
+    /// Whether `peer_id` is a known relay server. Relays are exempt from pruning and are kept out
+    /// of the kademlia DHT (they only speak the circuit protocol); they are NOT exempt from
+    /// penalties -- see [`Self::process_penalty`].
     pub(crate) fn is_relay(&self, peer_id: &PeerId) -> bool {
         self.relay_peers.contains(peer_id)
     }
@@ -507,13 +508,13 @@ impl PeerManager {
     /// being a relay -- from a bare peer id there is no way to tell a relay from a misconfigured or
     /// hostile peer -- so the only thing the caller may skip on this signal is the *gossip* penalty
     /// (the one such a peer would have tripped anyway). The peer stays subject to every other
-    /// penalty and to pruning. Relay-infrastructure protection (penalty- and prune-exempt,
-    /// kad-skipped) is granted only by [`Self::register_relays_from_addrs`], i.e. to the hop of
-    /// a `/p2p-circuit` we actually use: every relay we reserve on is registered at
+    /// penalty and to pruning. Relay registration (prune-exempt, kad-skipped -- never
+    /// penalty-exempt) is granted only by [`Self::register_relays_from_addrs`], i.e. to the hop
+    /// of a `/p2p-circuit` we actually use: every relay we reserve on is registered at
     /// `StartListening`, and every relay we dial a peer through is registered from that peer's
     /// advertised circuit address. A relay reaching here *without* being registered is one we
     /// do not depend on (typically one dialed via a leaked bare address), so leaving it
-    /// unprotected costs nothing.
+    /// unregistered costs nothing.
     ///
     /// Returns `false` when `peer_id` is a known committee validator: a validator that fails
     /// gossipsub negotiation is a real protocol/version fault the caller must surface, never a
@@ -531,7 +532,7 @@ impl PeerManager {
         for addr in addrs {
             if let Some(relay_id) = crate::types::circuit_relay_peer_id(addr) {
                 if self.relay_peers.insert(relay_id) {
-                    debug!(target: "peer-manager", ?relay_id, "registered relay peer (exempt from penalties)");
+                    debug!(target: "peer-manager", ?relay_id, "registered relay peer (prune-exempt, kept out of kad; penalties still apply)");
                 }
             }
         }
@@ -833,7 +834,7 @@ impl PeerManager {
         self.known_peers_time_added.insert(bls_key, now());
         self.known_peerids.insert(peer_id, bls_key);
 
-        // Learn the relay servers this peer is reached through so they are exempt from banning.
+        // Learn the relay servers this peer is reached through so they are prune-exempt.
         self.register_relays_from_addrs(&info.multiaddrs);
 
         // Cleanup if we've exceeded the maximum known peers limit

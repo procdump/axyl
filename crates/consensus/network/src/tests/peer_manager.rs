@@ -783,15 +783,17 @@ async fn test_non_gossip_peer_not_exempt_from_ban() {
     assert!(peer_manager.peer_banned(&peer), "non-gossip peer must be banned");
 }
 
-/// Relay protection is granted by construction, from the hop of a `/p2p-circuit` we use
+/// Relay registration is granted by construction, from the hop of a `/p2p-circuit` we use
 /// (`register_relays_from_addrs` -- fed by `StartListening` for every relay we reserve on and by
-/// a peer's advertised circuit address for every relay we dial through). A relay registered this
-/// way is exempt from consensus-layer penalties: a `Fatal` penalty must neither ban nor disconnect
-/// it. Regression for relayed nodes banning the very relays their circuits ride on.
+/// a peer's advertised circuit address for every relay we dial through). Registration makes the
+/// hop `is_relay` (prune-exempt, kept out of kad) but confers NO penalty exemption: scoring is
+/// behaviour-based, and no penalty fires for merely being a relay, so a `Fatal` on a registered hop
+/// must still disconnect and ban it. Guards against re-adding a blanket relay carve-out that would
+/// let a planted peer id become immune.
 #[tokio::test]
-async fn test_register_relays_from_circuit_addr_exempts_hop() {
+async fn test_registered_relay_hop_is_still_banned_by_fatal() {
     let mut peer_manager = create_test_peer_manager(None);
-    let relay = PeerId::random();
+    let relay = register_peer(&mut peer_manager, None);
     let dst = PeerId::random();
     let circuit: Multiaddr =
         format!("/ip4/127.0.0.1/udp/50000/quic-v1/p2p/{relay}/p2p-circuit/p2p/{dst}")
@@ -802,18 +804,20 @@ async fn test_register_relays_from_circuit_addr_exempts_hop() {
     assert!(peer_manager.is_relay(&relay), "the circuit's hop must be registered as a relay");
     assert!(!peer_manager.is_relay(&dst), "the circuit's destination is a peer, not a relay");
 
-    // a fatal penalty on the hop must be a no-op: no ban, no disconnect
+    // a fatal penalty on the hop is NOT waived: disconnect + ban like any other peer
     peer_manager.process_penalty(relay, Penalty::Fatal);
     let events = collect_all_events(&mut peer_manager);
+    let disconnects = extract_events(&events, |e| matches!(e, PeerEvent::DisconnectPeer(_)));
     assert!(
-        extract_events(&events, |e| matches!(
-            e,
-            PeerEvent::Banned(_) | PeerEvent::DisconnectPeer(_) | PeerEvent::DisconnectPeerX(_, _)
-        ))
-        .is_empty(),
-        "a registered relay must not be banned or disconnected by a consensus-layer penalty"
+        matches!(disconnects.first(), Some(PeerEvent::DisconnectPeer(id)) if *id == relay),
+        "a registered relay must be disconnected by a Fatal penalty"
     );
-    assert!(!peer_manager.peer_banned(&relay), "registered relay must not be banned");
+    assert!(
+        peer_manager.peer_banned(&relay),
+        "a registered relay must be banned by a Fatal penalty"
+    );
+    // registration itself is untouched: the hop stays prune-exempt while banned
+    assert!(peer_manager.is_relay(&relay));
 }
 
 /// `should_skip_gossip_penalty` must refuse a committee validator: a validator that fails gossipsub
