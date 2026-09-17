@@ -1,10 +1,45 @@
 //! Unit tests for network types.rs
 
-use super::{ConnectionPath, Endpoint, NodeRecord, Transport};
+use super::{dnsaddr_entry_matches, ConnectionPath, Endpoint, NodeRecord, Transport};
 use crate::common::create_multiaddr;
 use libp2p::{core::ConnectedPoint, Multiaddr, PeerId};
 use rayls_infrastructure_config::KeyConfig;
 use rayls_infrastructure_types::{BlsKeypair, BlsSigner};
+
+/// A `_dnsaddr` TXT entry terminating at the anchored peer is accepted whether it is a relay
+/// circuit (public view) or a direct address (the `MULTI_LISTEN` private view).
+#[test]
+fn dnsaddr_entry_matches_accepts_circuit_and_direct_to_expected_peer() {
+    let relay = PeerId::random();
+    let dst = PeerId::random();
+    let circuit: Multiaddr =
+        format!("/ip4/127.0.0.1/udp/50000/quic-v1/p2p/{relay}/p2p-circuit/p2p/{dst}")
+            .parse()
+            .expect("valid circuit multiaddr");
+    let direct: Multiaddr = format!("/ip4/127.0.0.1/udp/40000/quic-v1/p2p/{dst}")
+        .parse()
+        .expect("valid direct multiaddr");
+    assert!(dnsaddr_entry_matches(&circuit, &dst));
+    assert!(dnsaddr_entry_matches(&direct, &dst));
+}
+
+/// A poisoned zone must not be able to point the entry at some other peer -- including at the
+/// relay hop itself -- so anything terminating anywhere but the anchored peer is rejected.
+#[test]
+fn dnsaddr_entry_matches_rejects_wrong_destination() {
+    let relay = PeerId::random();
+    let dst = PeerId::random();
+    let other = PeerId::random();
+    let circuit: Multiaddr =
+        format!("/ip4/127.0.0.1/udp/50000/quic-v1/p2p/{relay}/p2p-circuit/p2p/{dst}")
+            .parse()
+            .expect("valid circuit multiaddr");
+    assert!(!dnsaddr_entry_matches(&circuit, &other), "terminates at a different peer");
+    assert!(!dnsaddr_entry_matches(&circuit, &relay), "the hop is not the destination");
+    let no_peer: Multiaddr =
+        "/ip4/127.0.0.1/udp/50000/quic-v1".parse().expect("valid multiaddr without /p2p");
+    assert!(!dnsaddr_entry_matches(&no_peer, &dst), "no destination at all");
+}
 
 #[test]
 fn test_node_record() {

@@ -414,6 +414,15 @@ where
 /// Free function taking a cloned resolver so it can run in a detached task off the swarm event
 /// loop -- the DNS lookup must never block the loop (see `AddBootstrapPeers`). The returned
 /// circuits are handed back via `NetworkCommand::RegisterRelays` for on-loop registration.
+///
+/// The zone is untrusted input, so every entry is validated against the `/dnsaddr` it was looked
+/// up for (see [`crate::types::dnsaddr_entry_matches`]): it must terminate at that address's
+/// `/p2p/<id>` -- the authenticated anchor, since the `/dnsaddr` itself came from the committee /
+/// a BLS-signed record. Both relay circuits and direct addresses qualify (a split-horizon zone
+/// serves direct records to co-located nodes). At most [`MAX_CIRCUITS_PER_DNSADDR`] entries are
+/// accepted per name, and a `/dnsaddr` without a `/p2p` suffix cannot be validated and is skipped.
+/// Without this a poisoned or misconfigured zone could register arbitrary peers as protected
+/// relays (via `RegisterRelays`) or fan dials out to an unbounded set of addresses.
 async fn resolve_relay_circuits(
     resolver: &hickory_resolver::TokioResolver,
     dnsaddrs: &[Multiaddr],
@@ -426,18 +435,37 @@ async fn resolve_relay_circuits(
         }) else {
             continue;
         };
+        // The trust anchor: the `/dnsaddr`'s own `/p2p/<id>` suffix (the last `P2p` component).
+        let Some(expected_dst) = addr
+            .iter()
+            .filter_map(|p| match p {
+                Protocol::P2p(id) => Some(id),
+                _ => None,
+            })
+            .last()
+        else {
+            warn!(target: "network", %addr, "/dnsaddr has no /p2p suffix; cannot validate resolved circuits, skipping");
+            continue;
+        };
         let name = format!("_dnsaddr.{host}");
         match resolver.txt_lookup(name.clone()).await {
             Ok(txts) => {
-                for record in txts.iter() {
+                let mut accepted = 0usize;
+                'records: for record in txts.iter() {
                     for data in record.txt_data() {
-                        if let Ok(s) = std::str::from_utf8(data) {
-                            if let Some(rest) = s.strip_prefix("dnsaddr=") {
-                                if let Ok(ma) = rest.parse::<Multiaddr>() {
-                                    circuits.push(ma);
-                                }
-                            }
+                        let Ok(s) = std::str::from_utf8(data) else { continue };
+                        let Some(rest) = s.strip_prefix("dnsaddr=") else { continue };
+                        let Ok(ma) = rest.parse::<Multiaddr>() else { continue };
+                        if !crate::types::dnsaddr_entry_matches(&ma, &expected_dst) {
+                            debug!(target: "network", %name, %ma, %expected_dst, "rejecting resolved dnsaddr entry: does not terminate at the anchored peer");
+                            continue;
                         }
+                        if accepted >= MAX_CIRCUITS_PER_DNSADDR {
+                            warn!(target: "network", %name, cap = MAX_CIRCUITS_PER_DNSADDR, "dnsaddr advertises more circuits than the cap; ignoring the rest");
+                            break 'records;
+                        }
+                        circuits.push(ma);
+                        accepted += 1;
                     }
                 }
             }
@@ -448,3 +476,10 @@ async fn resolve_relay_circuits(
     }
     circuits
 }
+
+/// Upper bound on entries accepted per `/dnsaddr` name. The zone is untrusted input: without a
+/// cap a single answer (up to 64 KiB over TCP, i.e. a few hundred circuit records) could register
+/// an unbounded number of "relays" and fan out an unbounded number of dials. Generous relative to
+/// real deployments (a node fronts itself with a couple of relays for failover, so 2-4 records per
+/// name) and equal to `libp2p-dns`'s own `MAX_TXT_RECORDS`.
+const MAX_CIRCUITS_PER_DNSADDR: usize = 16;

@@ -54,6 +54,23 @@ pub fn circuit_relay_peer_id(addr: &Multiaddr) -> Option<PeerId> {
     None
 }
 
+/// Returns true when `candidate` terminates at `expected_dst`: either a relay circuit
+/// `<relay>/p2p/<relay-id>/p2p-circuit/p2p/<expected_dst>` or a direct `<addr>/p2p/<expected_dst>`.
+///
+/// This is the acceptance test for an address learned from an untrusted source such as a
+/// `_dnsaddr` DNS TXT record. The `/dnsaddr/<host>/p2p/<id>` address it was resolved for comes
+/// from the committee / a BLS-signed record, so its `/p2p/<id>` suffix is the authenticated
+/// anchor: an entry terminating at a different peer (or at none) is rejected. Without this a
+/// poisoned zone could register arbitrary peers as protected relays or point a dial at a peer
+/// other than the one intended. Direct entries are deliberately allowed -- a split-horizon zone
+/// serves them to co-located nodes (`MULTI_LISTEN`), noise authenticates the destination anyway,
+/// and a non-circuit yields no relay hop to protect. It does NOT authenticate the relay hop
+/// itself -- nothing signed names it; granting the hop protection only once a circuit through it
+/// actually succeeds is the stronger follow-up.
+pub fn dnsaddr_entry_matches(candidate: &Multiaddr, expected_dst: &PeerId) -> bool {
+    matches!(candidate.iter().last(), Some(Protocol::P2p(id)) if id == *expected_dst)
+}
+
 /// The transport path a swarm connection was established over.
 ///
 /// Every protocol (gossipsub, kademlia, request-response) is multiplexed over the swarm's
