@@ -227,6 +227,8 @@ dispatch to the appropriate node subsystem.
 rayls-network
 ├── node          Start the validator/observer node
 ├── genesis       Run the genesis ceremony to create a new network
+├── schedule
+│   └── export    Dump a built-in hardfork schedule as a `--config-file`
 └── keytool
     ├── generate  Generate BLS + network keys for a validator or observer
     └── stake-calldata  Produce ABI-encoded calldata for the staking transaction
@@ -302,6 +304,19 @@ Key parameters:
 - **`generate observer`** — generates keys for a non-validating observer.
 - **`stake-calldata`** — reads existing keys and produces the ABI-encoded
   `ConsensusRegistry.stake(...)` calldata for on-chain staking.
+
+### `schedule` command (`ScheduleArgs`)
+
+- **`export --network <devnet|testnet|mainnet|local>`** — prints the hardfork
+  schedule baked into this binary for that network as a complete, loadable
+  network config file: one subnet (named after the network, or `--subnet-name`)
+  with its `chain_id` and every known fork, in table order under canonical
+  names. Redirect stdout to a file. Needs no datadir or passphrase. It is the
+  template for a client-defined subnet: rename the subnet, set its `chain_id`,
+  adjust blocks.
+  The devnet and local exports load as-is; the mainnet and testnet exports are
+  templates only, since `node --config-file` refuses their chain-ids (those
+  networks always run on `--network`), and their header says so.
 
 ---
 
