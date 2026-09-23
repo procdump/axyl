@@ -1,7 +1,12 @@
 # Template for a new client's network configuration file.
 #
 # Copy to <client>.yaml, fill in one entry per subnet this client operates.
-# The number of subnets is not fixed - each client defines its own.
+# The number of subnets is not fixed - each client defines its own. To start
+# from the schedule built into a binary instead of this blank template, run
+#
+#   rayls-network schedule export --network <devnet|testnet|mainnet|local>
+#
+# which prints a complete, loadable subnet for that network.
 #
 # Start a node from it with:
 #

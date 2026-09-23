@@ -218,5 +218,7 @@ pub fn verify_schedule_record<P: RaylsDirs>(
     Ok(())
 }
 
+pub mod export;
+
 #[cfg(test)]
 mod tests;
