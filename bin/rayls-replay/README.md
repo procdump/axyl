@@ -86,11 +86,14 @@ sequenceDiagram
 6. **Rewards** (`rewards.rs`). Pre-`HybridRewards` close-epoch blocks are rebuilt
    with the snapshot's committed leader tally, read from that block's withdrawals
    and staged into a snapshot-backed `RewardsBackend`. Post-fork close blocks need
-    per-validator participation rounds, which a block does not preserve; those are
-    recomputed over the snapshot's consensus DB with a forward, cursor-bounded
-    `ConsensusBlocks` walk (each epoch's rows read once, crediting exactly like
-    the live node's walker) and held to the block's withdrawals (leader rounds
-    must agree, or the replay aborts as a consensus/execution divergence).
+   per-validator participation rounds, which a block does not preserve; those are
+   recomputed by a forward, cursor-bounded walk over the snapshot's consensus DB
+   (`BoundedHybridWalker`, same crediting as the live node's walker) and held to the
+   block's withdrawals (leader rounds must agree, or the replay aborts as a
+   consensus/execution divergence). The live walker iterates `ConsensusBlocks` in
+   reverse from the newest row; against a snapshot that runs millions of rows past
+   the closing epoch that is a full tail scan per epoch close, so the replay reads
+   each epoch's rows exactly once by keyed lookup instead.
 
 ## Usage
 
@@ -127,6 +130,16 @@ run on `--network`). If the snapshot carries a `schedule-record.yaml` (taken
 from a node running the schedule-record boot gate), the selected schedule is
 verified against it read-only, and a schedule that moves an already-executed
 fork refuses the boot.
+
+### Historical schedules (`--config-file`)
+
+A replay has to apply the schedule the network *actually executed*, block by block.
+A baked-in `--chain` profile describes a network's intended schedule, which is not
+always what it ran: devnet, for example, was launched with `RAYLS_NETWORK=local` and
+followed the local schedule from genesis, so `--chain devnet` diverges at block 1.
+`etc/docker-replay/networks.yaml` (shipped in the image at `/etc/rayls/networks.yaml`)
+records the historical schedules; select one with
+`--config-file /etc/rayls/networks.yaml --subnet devnet` instead of `--chain`.
 
 ### Resuming
 

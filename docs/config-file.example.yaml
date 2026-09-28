@@ -1,4 +1,5 @@
 # Template for a new client's network configuration file.
+# Full guide (how, when, chain-id checks): docs/config-file.md
 #
 # Copy to <client>.yaml, fill in one entry per subnet this client operates.
 # The number of subnets is not fixed - each client defines its own. To start
@@ -63,8 +64,11 @@ networks:
       Erc20PrecompileBytecode: never
       TransactionLoadBalancing: never
       UsdrSupplyCorrection: never
-      EmptyOutputBlock: never
-      DynamicCommitteeSizing: never
-      HybridRewards: never
-      OutputSeqNormalization: never
-      SenderAffinityLoadBalancing: never
+      EmptyOutputBlock: 0
+      DynamicCommitteeSizing: 0
+      # Kept active to stay consistent with mainnet's fork set. Block 1, not 0:
+      # this is a migration (swaps genesis's reward contract for the hybrid one),
+      # and a migration at block 0 counts as already active, so it never runs.
+      HybridRewards: 1
+      OutputSeqNormalization: 0
+      SenderAffinityLoadBalancing: 0
