@@ -7,8 +7,8 @@ use clap::Parser;
 use eyre::{eyre, Context};
 use rayls_execution_evm::{
     reth_env::{RethCommand, RethConfig, RethEnv},
-    set_active_profile, verify_datadir_chain_id, verify_datadir_schedule_record, FileSchedule,
-    NetworkProfile, SelectedSchedule,
+    verify_datadir_chain_id, verify_datadir_schedule_record, FileSchedule, NetworkProfile,
+    SelectedSchedule,
 };
 use rayls_infrastructure_config::Parameters;
 use rayls_infrastructure_storage::open_db;
@@ -181,10 +181,8 @@ async fn run(cli: Cli) -> eyre::Result<()> {
 
     let base_chain = base_chain_spec(&genesis_path)?;
 
-    // Select and verify the hardfork schedule exactly like the node's boot gate,
-    // then install it: `RethEnv::new` consults the active profile first, so the
-    // profile must be set before either env is built. The profile is process-global,
-    // so a refused gate (any check above the install) must not leave it set.
+    // Select and verify the hardfork schedule exactly like the node's boot gate;
+    // both envs below are built from the selected profile.
     let file_schedule = match (&cli.config_file, &cli.subnet) {
         (Some(path), Some(subnet)) => Some(FileSchedule::load(path, subnet)?),
         _ => None,
@@ -199,7 +197,6 @@ async fn run(cli: Cli) -> eyre::Result<()> {
         hardforks = ?selected.profile.hardforks,
         "hardfork schedule selected"
     );
-    set_active_profile(selected.profile)?;
     let NetworkParams { basefee_address, min_base_fee } = network_params(&parameters_path)?;
     info!(
         target: "rayls_replay::main",
@@ -227,7 +224,7 @@ async fn run(cli: Cli) -> eyre::Result<()> {
         Arc::clone(&base_chain),
         &cli.archive_out,
         &archive_task_manager,
-        cli.network,
+        &selected.profile,
         basefee_address,
         Some(min_base_fee),
         cli.storage_v2,
@@ -288,7 +285,7 @@ async fn run(cli: Cli) -> eyre::Result<()> {
         Arc::clone(&base_chain),
         &cli.snapshot_datadir,
         &snapshot_task_manager,
-        cli.network,
+        &selected.profile,
         basefee_address,
         Some(min_base_fee),
         cli.storage_v2,

@@ -4,10 +4,7 @@ use crate::{
 };
 use eyre::OptionExt;
 use rayls_consensus_worker::{WorkerNetwork, WorkerNetworkHandle};
-use rayls_execution_evm::{
-    active_profile,
-    chainspec::{RaylsChainHardforks, RaylsHardforks},
-};
+use rayls_execution_evm::chainspec::{RaylsChainHardforks, RaylsHardforks};
 use rayls_infrastructure_config::{ConsensusConfig, LibP2pConfig, RaylsDirs};
 use rayls_infrastructure_types::{
     gas_accumulator::GasAccumulator, BatchValidation, BlsPublicKey, Database as ReDatabase,
@@ -217,16 +214,8 @@ where
     /// Before the fork: currently a no-op stub (unchanged from main).
     pub(super) fn adjust_base_fees(&self, gas_accumulator: &GasAccumulator, block_number: u64) {
         // The schedule the CLI boot gate selected (a `--config-file` subnet or the
-        // `--network` built-in). A booted node always has one installed; an engine
-        // that skipped the gate (test utilities) has no schedule and trips the
-        // `debug_assert!` below if it reaches this path.
-        let hardforks = match active_profile() {
-            Some(profile) => RaylsChainHardforks::new(profile.schedule()),
-            None => {
-                debug_assert!(false, "a booted node always has the selected schedule installed");
-                RaylsChainHardforks::new(Vec::new())
-            }
-        };
+        // `--network` built-in), carried by the builder.
+        let hardforks = RaylsChainHardforks::new(self.builder.profile.schedule());
         if hardforks.is_eip1559_active_at_block(block_number) {
             // per-block EIP-1559 active — base fee is updated per-block by the payload builder
             return;
