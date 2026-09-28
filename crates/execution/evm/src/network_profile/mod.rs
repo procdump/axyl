@@ -6,12 +6,12 @@
 //! into the binary; everything else (genesis, parameters, committee, node
 //! identity) still comes from the node's datadir.
 //!
-//! The selected subnet is stored in a process-wide
-//! [`OnceLock`](std::sync::OnceLock) so the execution layer can reach it
-//! without threading it through every constructor.
+//! The selected subnet is carried explicitly: the CLI boot gate hands the
+//! [`NetworkProfile`] to the node builder, which passes it to every execution
+//! layer constructor. Nothing is process-global, so several nodes (or tests)
+//! can run in one process with different schedules.
 
 mod activation;
-mod active;
 mod config_file;
 mod fork_name;
 mod profile;
@@ -22,7 +22,6 @@ mod verify;
 mod tests;
 
 pub use activation::ForkActivation;
-pub use active::{active_profile, set_active_profile};
 pub use config_file::NetworkConfigFile;
 pub use fork_name::ForkName;
 pub use profile::NetworkProfile;

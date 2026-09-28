@@ -10,7 +10,7 @@ use fdlimit::raise_fd_limit;
 use rayls_execution_evm::{
     parse_socket_address,
     reth_env::{RethCommand, RethConfig},
-    set_active_profile, verify_datadir_chain_id, FileSchedule, SelectedSchedule,
+    verify_datadir_chain_id, FileSchedule, SelectedSchedule,
 };
 use rayls_infrastructure_config::Config;
 // dev-only: reading the committee file for the single-validator gating check
@@ -367,16 +367,14 @@ impl<Ext: clap::Args + fmt::Debug> NodeCommand<Ext> {
         // this chain has already run. The datadir's schedule record pins what was executed.
         verify_schedule_record(&rl_datadir, &node_config, &selected.profile)?;
 
-        // Commit the selected profile only once the gate has passed: the active
-        // profile is process-global (a OnceLock), so a refused boot must not
-        // leave it set for anything that runs afterwards in this process.
+        // The gate has passed: the selected profile travels with the builder into
+        // every execution-layer constructor (nothing about it is process-global).
         info!(
             target: "cli",
             source = %selected.source,
             chain_id = actual_chain_id,
             "hardfork schedule selected"
         );
-        set_active_profile(selected.profile)?;
 
         let build_metadata = BuildMetadata {
             version: env!("CARGO_PKG_VERSION"),
@@ -390,6 +388,7 @@ impl<Ext: clap::Args + fmt::Debug> NodeCommand<Ext> {
         let builder = RaylsBuilder::new_with_consensus_db_config(
             node_config,
             rayls_infrastructure_config,
+            selected.profile,
             None,
             metrics,
             healthcheck,
