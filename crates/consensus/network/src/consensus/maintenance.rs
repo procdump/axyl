@@ -94,6 +94,23 @@ where
     /// and worker use separate vecs, so `reset()` only clears this swarm's rows. All tables are
     /// snapshotted into owned strings before touching the metrics so the swarm borrow is released
     /// first.
+    /// Publish the peer manager's relay peer addr set sizes as
+    /// `relay_peer_addr_set_size{set, swarm}`, one series per set.
+    pub(super) fn refresh_relay_set_metrics(&self) {
+        let sizes = self.swarm.behaviour().peer_manager.relay_set_sizes();
+        for (set, size) in [
+            ("registered", sizes.registered),
+            ("configured", sizes.configured),
+            ("pending", sizes.pending),
+            ("circuits", sizes.circuits),
+        ] {
+            self.network_metrics
+                .relay_peer_addr_set_size
+                .with_label_values(&[set, self.network_label])
+                .set(size as i64);
+        }
+    }
+
     pub(super) fn refresh_peer_addr_metrics(&mut self) {
         // kad routing table (connected peers, working addresses)
         let mut kad_entries: Vec<(String, String)> = Vec::new();
