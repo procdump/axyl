@@ -215,6 +215,20 @@ impl PeerManager {
         // comes up before the circuit does. Note the hop so the leg is classified as a relay leg
         // and kept out of kad meanwhile; it becomes a registered relay only once the circuit is
         // actually established (`relay_circuit_established`). No-op for non-circuit addresses.
+        //
+        // Deliberately BEFORE the early returns below, not after. The two placements fail in
+        // opposite directions and the costs are not symmetric. Noting late can miss the hop:
+        // `Dialing` means an earlier request is already in flight, possibly started by kademlia
+        // or with an address set that carried no circuit, and `Connected` means the leg is
+        // already up and the next reconnect through this circuit address needs the hop known.
+        // A hop that is not a candidate when its leg comes up is classified as an ordinary
+        // direct connection, added to our kad routing table and sent our record; other nodes
+        // then discover and dial the relay as a peer and ban it for not speaking the consensus
+        // protocols, which on a shared IP takes real peers down with it. Noting early costs
+        // nothing: a candidate grants no exemption, is skipped by fan-out and the kad add for
+        // one TTL and is then forgotten, and `note_relay_hops_from_addrs` never notes a bound
+        // peer and never extends an existing TTL, so a rejected dial cannot be used to park a
+        // peer id here.
         self.note_relay_hops_from_addrs(&multiaddrs);
         // return early if peer is banned, connected, or currently being dialed
         if let Some(peer) = self.peers.get_peer(&peer_id) {
