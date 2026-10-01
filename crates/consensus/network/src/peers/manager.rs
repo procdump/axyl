@@ -555,13 +555,26 @@ impl PeerManager {
 
     /// Note the hops of the `/p2p-circuit` addresses in `addrs` as candidates (see
     /// [`Self::is_relay_hop_candidate`]). No-op for non-circuit addresses.
+    ///
+    /// Two guards keep a circuit address from parking an arbitrary peer id in the candidate
+    /// set, where it would be skipped by request fan-out and the kad add:
+    /// - A hop that already has a BLS binding is never noted. A relay only speaks the circuit
+    ///   protocol and never pushes a node record, so a bound peer is a validator or observer, not a
+    ///   relay, whatever address named it.
+    /// - A hop already noted keeps its original timestamp, so the TTL runs from the first dial
+    ///   through it. The committee redial re-dials a missing member every heartbeat; renewing the
+    ///   timestamp on each attempt would keep the hop a candidate for as long as the member stays
+    ///   missing, which is exactly the lifetime an attacker's circuit address would want.
     pub(crate) fn note_relay_hops_from_addrs(&mut self, addrs: &[Multiaddr]) {
         let noted_at = now();
         for addr in addrs {
             if let Some(relay_id) = crate::types::circuit_relay_peer_id(addr) {
-                if !self.relay_peers.contains(&relay_id) {
-                    self.pending_relay_hops.insert(relay_id, noted_at);
+                if self.relay_peers.contains(&relay_id)
+                    || self.known_peerids.contains_key(&relay_id)
+                {
+                    continue;
                 }
+                self.pending_relay_hops.entry(relay_id).or_insert(noted_at);
             }
         }
     }
@@ -594,6 +607,9 @@ impl PeerManager {
     /// registered while the leg to it is up; once the leg is gone and the relay is not configured,
     /// the registration goes with it, so `relay_peers` holds configured relays and relays this
     /// node is currently connected to, nothing stale.
+    ///
+    /// Called for every peer whose last connection closes, relay or not: for a peer that was
+    /// never registered both removals are no-ops, so the caller need not know which it was.
     pub(crate) fn relay_disconnected(&mut self, relay: PeerId) {
         self.relay_circuits.remove(&relay);
         if !self.configured_relays.contains(&relay) && self.relay_peers.remove(&relay) {
