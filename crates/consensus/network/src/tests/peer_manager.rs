@@ -935,16 +935,47 @@ async fn test_pending_relay_hop_expires_without_a_circuit() {
         format!("/ip4/127.0.0.1/udp/50000/quic-v1/p2p/{relay}/p2p-circuit/p2p/{dst}")
             .parse()
             .expect("valid circuit multiaddr");
-    peer_manager.dial_peer(dst, vec![circuit], None);
+    let noted_at = now();
+    peer_manager.dial_peer(dst, vec![circuit.clone()], None);
     assert!(peer_manager.is_relay_hop_candidate(&relay));
 
     // still within the window
-    peer_manager.expire_pending_relay_hops(now() + 30);
+    peer_manager.expire_pending_relay_hops(noted_at + 30);
     assert!(peer_manager.is_relay_hop_candidate(&relay));
-    // past it
-    peer_manager.expire_pending_relay_hops(now() + 120);
-    assert!(!peer_manager.is_relay_hop_candidate(&relay));
+
+    // a redial through the same hop does not restart the clock: the committee redial retries a
+    // missing member every heartbeat, and a renewed timestamp would keep the hop a candidate for
+    // as long as the member stays missing
+    peer_manager.dial_peer(dst, vec![circuit], None);
+    peer_manager.expire_pending_relay_hops(noted_at + 120);
+    assert!(!peer_manager.is_relay_hop_candidate(&relay), "TTL runs from the first dial");
     assert!(!peer_manager.is_relay(&relay));
+}
+
+/// A circuit address naming a peer that already has a BLS binding does not make that peer a
+/// candidate. A relay never pushes a node record, so a bound peer is a validator or observer,
+/// and treating it as a hop would skip it for request fan-out and the kad add on the word of
+/// whoever wrote the address.
+#[tokio::test]
+async fn test_bound_peer_is_never_a_relay_hop_candidate() {
+    let mut peer_manager = create_test_peer_manager(None);
+    let bls = *BlsKeypair::generate(&mut rand::rng()).public();
+    let netkey: NetworkPublicKey = NetworkKeypair::generate_ed25519().public().into();
+    let validator_id: PeerId = netkey.clone().into();
+    peer_manager.add_known_peer(
+        bls,
+        NetworkInfo { pubkey: netkey, multiaddrs: vec![create_multiaddr(None)], timestamp: now() },
+    );
+
+    let dst = PeerId::random();
+    let circuit: Multiaddr =
+        format!("/ip4/127.0.0.1/udp/50000/quic-v1/p2p/{validator_id}/p2p-circuit/p2p/{dst}")
+            .parse()
+            .expect("valid circuit multiaddr");
+    peer_manager.dial_peer(dst, vec![circuit], None);
+
+    assert!(!peer_manager.is_relay_hop_candidate(&validator_id));
+    assert!(!peer_manager.is_relay(&validator_id));
 }
 
 /// `should_skip_gossip_penalty` must refuse a committee validator: a validator that fails gossipsub

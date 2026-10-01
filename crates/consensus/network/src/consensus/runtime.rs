@@ -222,7 +222,9 @@ where
                     self.swarm.behaviour().peer_manager.is_relay_hop_candidate(&peer_id),
                 );
                 // A circuit is up through this relay: that, and not the address that named it,
-                // is what makes the hop a relay this node depends on.
+                // is what makes the hop a relay this node depends on. Fires for inbound circuits
+                // too; those only arrive through a relay this node holds a reservation on, which
+                // `StartListening` already registered as configured, so the call is a no-op there.
                 if let ConnectionPath::Circuit { relay: Some(relay), .. } = path {
                     self.swarm.behaviour_mut().peer_manager.relay_circuit_established(relay);
                 }
@@ -267,7 +269,8 @@ where
                     self.swarm.behaviour_mut().peer_manager.relay_circuit_closed(relay);
                 }
                 // The last connection to this peer is gone. If it was a relay we reached peers
-                // through, its registration ends here, not when its last circuit closed.
+                // through, its registration ends here, not when its last circuit closed. For any
+                // other peer this is a no-op; the peer manager does not need to be told which.
                 if num_established == 0 {
                     self.swarm.behaviour_mut().peer_manager.relay_disconnected(peer_id);
                 }
