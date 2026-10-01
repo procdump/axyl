@@ -898,6 +898,66 @@ async fn test_third_party_record_cannot_remap_a_bound_peer() {
     );
     // the dial entry follows the claim, which costs whoever dials it a failed handshake
     assert_eq!(peer_manager.auth_to_peer(attacker_bls).map(|(id, _)| id), Some(victim_id));
+    // the victim's peer entry is untouched too: not relabelled with the attacker's key
+    assert_eq!(
+        peer_manager.peers.get_peer(&victim_id).and_then(|p| p.bls_public_key()),
+        Some(victim_bls),
+        "a third-party record must not relabel a tracked peer's entry"
+    );
+}
+
+/// Evicting the attacker's dial entry must not take the victim's binding with it. The old
+/// eviction followed the evicted entry's network key to find the binding to drop, and a forged
+/// entry pointed that at the victim, so a full `known_peers` table silently unbound the victim on
+/// the next cleanup. Bindings are now removed by the evicted BLS key.
+#[tokio::test]
+async fn test_evicting_a_forged_dial_entry_keeps_the_victims_binding() {
+    let mut peer_manager = create_test_peer_manager(None);
+    let victim_bls = *BlsKeypair::generate(&mut rand::rng()).public();
+    let victim_netkey: NetworkPublicKey = NetworkKeypair::generate_ed25519().public().into();
+    let victim_id: PeerId = victim_netkey.clone().into();
+    let attacker_bls = *BlsKeypair::generate(&mut rand::rng()).public();
+
+    peer_manager.add_known_peer(
+        victim_bls,
+        NetworkInfo {
+            pubkey: victim_netkey.clone(),
+            multiaddrs: vec![create_multiaddr(None)],
+            timestamp: now(),
+        },
+    );
+    peer_manager.add_known_peer_addrs(
+        attacker_bls,
+        NetworkInfo {
+            pubkey: victim_netkey,
+            multiaddrs: vec![create_multiaddr(None)],
+            timestamp: now(),
+        },
+    );
+    // make the attacker's entry the oldest so the cleanup evicts it first
+    peer_manager.known_peers_time_added.insert(attacker_bls, 0);
+    assert_eq!(peer_manager.peer_to_bls(&victim_id), Some(victim_bls));
+
+    // overflow the dial table so a cleanup pass runs and evicts exactly one entry
+    for _ in 0..MAX_KNOWN_PEERS {
+        let bls = *BlsKeypair::generate(&mut rand::rng()).public();
+        let netkey: NetworkPublicKey = NetworkKeypair::generate_ed25519().public().into();
+        peer_manager.add_known_peer_addrs(
+            bls,
+            NetworkInfo {
+                pubkey: netkey,
+                multiaddrs: vec![create_multiaddr(None)],
+                timestamp: now(),
+            },
+        );
+    }
+
+    assert!(peer_manager.auth_to_peer(attacker_bls).is_none(), "the forged entry was evicted");
+    assert_eq!(
+        peer_manager.peer_to_bls(&victim_id),
+        Some(victim_bls),
+        "evicting the forged entry must not drop the victim's binding"
+    );
 }
 
 /// `should_skip_gossip_penalty` must refuse a committee validator: a validator that fails gossipsub

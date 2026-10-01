@@ -835,21 +835,42 @@ impl PeerManager {
             target: "peer-manager",
             ?bls_key,
             ?peer_id,
-            bind,
             known_peerids_len = self.known_peerids.len(),
-            "add_known_peer",
+            "{}",
+            if bind { "add_known_peer" } else { "add_known_peer_addrs" },
         );
-        self.peers.upsert_peer(bls_key, info.pubkey.clone(), info.multiaddrs.clone());
 
-        // A member banned before discovery resolved it still carries its ban after `upsert_peer`
-        // trusts it; release it so the unban action repairs the gossipsub blacklist and kad routing
-        // entry. Not in `upsert_peer`: `new_epoch` also calls it and does its own boundary unban.
-        if self.peers.is_peer_validator(&peer_id)
-            && self.peers.get_peer(&peer_id).is_some_and(|p| p.connection_status().is_banned())
-        {
-            let action =
-                self.peers.update_connection_status(&peer_id, NewConnectionStatus::Unbanned);
-            self.apply_peer_action(peer_id, action);
+        // A third-party record naming a network key this node already tracks under another BLS
+        // key must not touch that peer's entry: `upsert_peer` would relabel the entry with the
+        // record's BLS key and append the record's addresses to it, and the unban below would act
+        // on the named peer. The record stays a dial hint for its own BLS key, nothing more.
+        let relabels_tracked_peer = !bind
+            && self
+                .peers
+                .get_peer(&peer_id)
+                .and_then(|peer| peer.bls_public_key())
+                .is_some_and(|tracked| tracked != bls_key);
+        if relabels_tracked_peer {
+            debug!(
+                target: "peer-manager",
+                ?bls_key,
+                ?peer_id,
+                "third-party record names a tracked peer's network key under another BLS key; kept as a dial hint only",
+            );
+        } else {
+            self.peers.upsert_peer(bls_key, info.pubkey.clone(), info.multiaddrs.clone());
+
+            // A member banned before discovery resolved it still carries its ban after
+            // `upsert_peer` trusts it; release it so the unban action repairs the gossipsub
+            // blacklist and kad routing entry. Not in `upsert_peer`: `new_epoch` also calls it
+            // and does its own boundary unban.
+            if self.peers.is_peer_validator(&peer_id)
+                && self.peers.get_peer(&peer_id).is_some_and(|p| p.connection_status().is_banned())
+            {
+                let action =
+                    self.peers.update_connection_status(&peer_id, NewConnectionStatus::Unbanned);
+                self.apply_peer_action(peer_id, action);
+            }
         }
 
         self.known_peers.insert(bls_key, info.clone());
