@@ -96,8 +96,9 @@ pub struct Totals {
     pub certs: u64,
     pub batches: u64,
     pub signatures: u64,
-    /// Distinct certificate authors seen.
-    pub authors: usize,
+    /// Distinct authors seen, as a sub-dag's leader or as a certificate's author. A leader is
+    /// normally inside its own sub-dag, so the two sets coincide on a healthy chain.
+    pub authors: u64,
 }
 
 /// One authority's counts, all counts of stored rows or bits.
@@ -320,7 +321,7 @@ pub fn participation(nodes: &[NodeDb], epoch: Epoch) -> eyre::Result<Participati
         view.after_boundary = walk.after_boundary;
         view.committee_size = committee.as_ref().map(|(ids, _)| ids.len());
         view.committee_from = committee.as_ref().map(|(_, from)| *from);
-        view.totals = Totals { authors: walk.tallies.len(), ..walk.totals };
+        view.totals = Totals { authors: walk.tallies.len() as u64, ..walk.totals };
         view.authorities = rows;
         view.unknown_signers = walk.unknown_signers;
         views.push(view);
@@ -341,12 +342,17 @@ fn verdict(views: &[ParticipationNodeView]) -> Verdict {
     let open = views.iter().filter(|v| v.state == EpochState::Open).count();
     let not_reached = views.iter().filter(|v| v.state == EpochState::NotReached).count();
 
-    // one authority's comparable counts: participation, anchor, certs, batches
-    type Counts = (String, [u64; 4]);
-    let tally_variants: BTreeSet<Vec<Counts>> = closed
+    /// What two closed nodes must agree on for the tally to match: the header count (the
+    /// epoch's `totalRounds`) and, per authority, participation, anchor, certs and batches.
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    struct TallyFingerprint {
+        headers: u64,
+        rows: Vec<(String, [u64; 4])>,
+    }
+    let tally_variants: BTreeSet<TallyFingerprint> = closed
         .iter()
         .map(|v| {
-            let mut rows: Vec<Counts> = v
+            let mut rows: Vec<_> = v
                 .authorities
                 .iter()
                 .map(|r| {
@@ -362,9 +368,7 @@ fn verdict(views: &[ParticipationNodeView]) -> Verdict {
                 })
                 .collect();
             rows.sort();
-            // the header count is part of the tally too (`totalRounds`)
-            rows.push((String::new(), [v.headers, 0, 0, 0]));
-            rows
+            TallyFingerprint { headers: v.headers, rows }
         })
         .collect();
     let signer_variants: BTreeSet<Vec<(String, u64)>> = closed
