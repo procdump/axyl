@@ -414,7 +414,9 @@ impl RaylsHardFork {
         ]
     }
 
-    /// Local network hardfork schedule (first four hardforks active at genesis).
+    /// Local network hardfork schedule: every behavior fork is active at genesis, the
+    /// migrations activate at their `LOCAL_*` blocks, and RlsStorage, Tokenomics and Uups are
+    /// `Never` because the local genesis already carries their state.
     pub const fn local() -> [ScheduledFork; 16] {
         [
             ScheduledFork::new(Self::Eip1559, ForkCondition::Block(LOCAL_EIP1559_BLOCK)),
@@ -512,7 +514,7 @@ impl RaylsChainHardforks {
         Self::new(RaylsHardFork::mainnet())
     }
 
-    /// Create with local schedule (first four hardforks active at genesis).
+    /// Create with the local schedule (see [`RaylsHardFork::local`]).
     pub fn local() -> Self {
         Self::new(RaylsHardFork::local())
     }

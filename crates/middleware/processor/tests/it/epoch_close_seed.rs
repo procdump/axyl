@@ -1,12 +1,11 @@
-//! Integration test for the seed stamped into the epoch-closing block's `extra_data`.
+//! Integration tests for the seed stamped into the epoch-closing block's `extra_data`.
 //!
 //! With `EpochCloseSeedV2` active the seed is the closing output's consensus header hash, which
 //! every node derives identically. Before the fork it is the keccak of the leader certificate's
 //! aggregate BLS signature, which varies with the 2f+1 signer subset and let two honest nodes
-//! stamp different `extra_data` for identical state (#233). The pre-fork value is covered by the
-//! happy-path tests in `main.rs`, whose temp chain runs without Rayls hardforks.
-
-#![allow(dead_code, unreachable_pub)]
+//! stamp different `extra_data` for identical state (#233). The genesis-active case and both
+//! sides of a mid-chain activation boundary are covered here; the happy-path tests in `main.rs`
+//! cover the pre-fork value on a temp chain that runs without Rayls hardforks.
 
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
@@ -49,6 +48,7 @@ fn build_output(
     leader.header.round = round;
     leader.header.created_at = timestamp;
     leader.header_mut_for_test().author = leader_id;
+    // One commit per output in these tests, so the sub-dag index equals the output number.
     let sub_dag = Arc::new(CommittedSubDag::new(
         vec![leader.clone()],
         leader,
@@ -74,15 +74,22 @@ fn build_output(
     }
 }
 
-/// Drive a plain output and then an epoch-closing output through the engine with
-/// `EpochCloseSeedV2` active from genesis, and assert the closing block's `extra_data` is the
-/// closing output's consensus header hash rather than the legacy leader-signature keccak.
-#[tokio::test]
-async fn epoch_close_block_extra_data_is_consensus_header_hash_post_fork() -> eyre::Result<()> {
+/// What the engine stamped into the epoch-closing block (block 2), next to the two candidate
+/// seeds for that output.
+struct ClosingBlock {
+    extra_data: Vec<u8>,
+    new_seed: B256,
+    legacy_seed: B256,
+}
+
+/// Drive a plain output (block 1) and then an epoch-closing output (block 2) through the engine
+/// with `EpochCloseSeedV2` activating at `fork_block`, and return the closing block's
+/// `extra_data` together with both candidate seeds.
+async fn run_epoch_close(fork_block: u64) -> eyre::Result<ClosingBlock> {
     let chain: Arc<RethChainSpec> = Arc::new(test_genesis().into());
     let rayls_spec = Arc::new(
         RaylsChainSpec::builder(chain.clone())
-            .epoch_close_seed_v2(0)
+            .epoch_close_seed_v2(fork_block)
             .base_fee_params(BaseFeeParams::ethereum())
             .build(),
     );
@@ -120,10 +127,10 @@ async fn epoch_close_block_extra_data_is_consensus_header_hash_post_fork() -> ey
     // The two derivations have structurally different inputs: the legacy seed is the keccak of
     // the leader certificate's aggregate signature (the default, vote-less signature here, since
     // the test leader carries no votes), the new one is the consensus header hash. The inequality
-    // guards the assertions below against passing trivially, it is not a coincidence check.
-    let expected_seed = output_2.epoch_close_seed();
+    // guards the callers' assertions against passing trivially, it is not a coincidence check.
+    let new_seed = output_2.epoch_close_seed();
     let legacy_seed = output_2.keccak_leader_sigs();
-    assert_ne!(expected_seed, legacy_seed, "the two derivations must be distinguishable");
+    assert_ne!(new_seed, legacy_seed, "the two derivations must be distinguishable");
 
     let reth_env = execution_node.get_reth_env().await;
     let shutdown = Notifier::default();
@@ -166,16 +173,50 @@ async fn epoch_close_block_extra_data_is_consensus_header_hash_post_fork() -> ey
     let blocks = reth_env.block_with_senders_range(1..=2)?;
     assert_eq!(blocks.len(), 2, "one block per output");
     assert!(blocks[0].extra_data.is_empty(), "a non-closing block carries no seed");
+
+    Ok(ClosingBlock { extra_data: blocks[1].extra_data.to_vec(), new_seed, legacy_seed })
+}
+
+/// With the fork active from genesis, the closing block's `extra_data` is the closing output's
+/// consensus header hash rather than the legacy leader-signature keccak.
+#[tokio::test]
+async fn epoch_close_block_extra_data_is_consensus_header_hash_post_fork() -> eyre::Result<()> {
+    let closing = run_epoch_close(0).await?;
     assert_eq!(
-        blocks[1].extra_data.as_ref(),
-        expected_seed.as_slice(),
+        closing.extra_data,
+        closing.new_seed.as_slice(),
         "post-fork the closing block's extra_data is the consensus header hash"
     );
     assert_ne!(
-        blocks[1].extra_data.as_ref(),
-        legacy_seed.as_slice(),
+        closing.extra_data,
+        closing.legacy_seed.as_slice(),
         "post-fork the closing block must not carry the leader-signature keccak"
     );
+    Ok(())
+}
 
+/// The gate is evaluated at the block the closing output produces. Closing exactly at the
+/// activation block uses the new seed; closing one block before it keeps the legacy seed byte
+/// for byte, so a mid-chain activation changes block hashes only from the scheduled block on.
+#[tokio::test]
+async fn epoch_close_seed_switches_at_the_activation_block() -> eyre::Result<()> {
+    let at_activation = run_epoch_close(2).await?;
+    assert_eq!(
+        at_activation.extra_data,
+        at_activation.new_seed.as_slice(),
+        "closing at the activation block uses the new seed"
+    );
+
+    let before_activation = run_epoch_close(3).await?;
+    assert_eq!(
+        before_activation.extra_data,
+        before_activation.legacy_seed.as_slice(),
+        "closing before the activation block keeps the legacy seed"
+    );
+    assert_ne!(
+        before_activation.extra_data,
+        before_activation.new_seed.as_slice(),
+        "pre-fork the closing block must not carry the consensus header hash"
+    );
     Ok(())
 }
