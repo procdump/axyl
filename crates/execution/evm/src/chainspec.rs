@@ -1032,8 +1032,10 @@ mod tests {
     #[test]
     fn local_network_first_four_hardforks_active_at_block_0() {
         let hardforks = RaylsChainHardforks::local();
-        // Only first 4 hardforks are active for local network (RlsStorage, Tokenomics, Uups are
-        // Never)
+        // The four original forks are genesis-active on local. Later behavior forks
+        // (EmptyOutputBlock, DynamicCommitteeSizing, OutputSeqNormalization,
+        // SenderAffinityLoadBalancing, EpochCloseSeedV2) are also block 0 on local; the
+        // version-byte tests below cover them.
         let active_forks = [
             RaylsHardFork::Eip1559,
             RaylsHardFork::BatchDigestV2,
@@ -1050,9 +1052,10 @@ mod tests {
     }
 
     #[test]
-    fn local_network_last_three_hardforks_never_activate() {
+    fn local_network_never_forks_never_activate() {
         let hardforks = RaylsChainHardforks::local();
-        // Last 3 hardforks are set to Never for local network
+        // RlsStorage, Tokenomics and Uups are Never on local: their state is already in the local
+        // genesis, so the migrations have nothing to apply.
         let never_forks =
             [RaylsHardFork::RlsStorage, RaylsHardFork::Tokenomics, RaylsHardFork::Uups];
         for fork in never_forks {

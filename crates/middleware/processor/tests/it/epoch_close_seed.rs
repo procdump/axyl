@@ -117,6 +117,10 @@ async fn epoch_close_block_extra_data_is_consensus_header_hash_post_fork() -> ey
     write_canonical_header(&consensus_store, &output_1.consensus_header());
     write_canonical_header(&consensus_store, &output_2.consensus_header());
 
+    // The two derivations have structurally different inputs: the legacy seed is the keccak of
+    // the leader certificate's aggregate signature (the default, vote-less signature here, since
+    // the test leader carries no votes), the new one is the consensus header hash. The inequality
+    // guards the assertions below against passing trivially, it is not a coincidence check.
     let expected_seed = output_2.epoch_close_seed();
     let legacy_seed = output_2.keccak_leader_sigs();
     assert_ne!(expected_seed, legacy_seed, "the two derivations must be distinguishable");

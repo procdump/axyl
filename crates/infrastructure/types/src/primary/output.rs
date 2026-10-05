@@ -186,8 +186,34 @@ impl ConsensusOutput {
     /// the epoch-closing block hash identical across nodes. The value only has to be
     /// deterministic and shared: with `DynamicCommitteeSizing` active nothing reads it as
     /// randomness, the next committee is the sorted registry set.
+    ///
+    /// This is the same value as this output's own [`Hash::digest`] (`ConsensusDigest`), so the
+    /// closing block's `extra_data` ends up holding the output's consensus digest.
     pub fn epoch_close_seed(&self) -> B256 {
-        self.consensus_header_hash()
+        let seed = self.consensus_header_hash();
+        let leader = self.leader();
+
+        // Log the inputs once per epoch close so a seed can be attributed to its consensus
+        // position directly: an `extra_data` disagreement between nodes would now mean they
+        // committed different consensus headers, not different certificate variants. The signer
+        // set no longer feeds the seed, but it still tells which certificate variant this node
+        // holds for the leader header, which is the attribution that mattered on 2026-08-16.
+        info!(
+            target: "engine",
+            epoch = leader.epoch(),
+            round = leader.round(),
+            leader = %leader.origin(),
+            header_digest = ?leader.digest(),
+            signer_count = leader.signed_authorities().len(),
+            signers = ?leader.signed_authorities().iter().collect::<Vec<_>>(),
+            output_number = self.number,
+            parent_hash = ?self.parent_hash,
+            certificates = self.sub_dag.len(),
+            ?seed,
+            "epoch-close seed derived from consensus header",
+        );
+
+        seed
     }
 }
 
