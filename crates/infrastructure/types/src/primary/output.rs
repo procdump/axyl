@@ -136,8 +136,15 @@ impl ConsensusOutput {
         self.close_epoch.then_some(self.batch_digests.is_empty())
     }
 
-    /// Generate the source of randomness to shuffle future committees at the epoch boundary. The
-    /// source of randomness comes from the keccak hash of the leader's aggregate signature.
+    /// Legacy epoch-close seed, stamped into the epoch-closing block's `extra_data` for blocks
+    /// before the `EpochCloseSeedV2` hardfork: the keccak hash of the leader certificate's
+    /// aggregate BLS signature.
+    ///
+    /// The aggregate is not canonical: it varies with the 2f+1 signer subset the certifier
+    /// chose, and the certificate digest does not cover it, so two honest nodes can hold
+    /// different certificates for the same leader header and derive different seeds (#233).
+    /// Kept byte-for-byte so pre-fork history replays unchanged; post-fork blocks use
+    /// [`Self::epoch_close_seed`].
     ///
     /// NOTE: this cannot fail - uses [BlsSignature::default] and is considered acceptable with
     /// permissioned validator set, but should never happen.
@@ -168,6 +175,19 @@ impl ConsensusOutput {
         );
 
         randomness
+    }
+
+    /// Epoch-close seed stamped into the epoch-closing block's `extra_data` once the
+    /// `EpochCloseSeedV2` hardfork is active: the hash of this output's consensus header.
+    ///
+    /// The consensus header hash covers the parent hash, the committed sub-dag by certificate
+    /// digests (so no signatures) and the output number. Every honest node derives the same
+    /// value whichever certificate variant it holds for the leader header, which is what keeps
+    /// the epoch-closing block hash identical across nodes. The value only has to be
+    /// deterministic and shared: with `DynamicCommitteeSizing` active nothing reads it as
+    /// randomness, the next committee is the sorted registry set.
+    pub fn epoch_close_seed(&self) -> B256 {
+        self.consensus_header_hash()
     }
 }
 
