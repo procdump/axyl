@@ -195,6 +195,7 @@ impl PeerManager {
         }
         let peer_id: PeerId = info.pubkey.clone().into();
         debug!(target: "peer-manager", ?peer_id, "Inserting trusted peer into known_peerids");
+        self.known_peerids.retain(|_, bound| bound != &bls_key);
         self.known_peerids.insert(peer_id, bls_key);
         debug!(target: "peer-manager", ?peer_id, "Inserting trusted peer into known_peers");
         self.known_peers.insert(bls_key, info);
@@ -1027,6 +1028,9 @@ impl PeerManager {
         self.known_peers.insert(bls_key, info.clone());
         self.known_peers_time_added.insert(bls_key, now());
         if bind {
+            // One binding per BLS key: a peer that re-binds from a new network key must not leave
+            // its old peer id attributed to it. The map is keyed by peer id, so clear by value.
+            self.known_peerids.retain(|_, bound| bound != &bls_key);
             self.known_peerids.insert(peer_id, bls_key);
         }
 
@@ -1088,10 +1092,10 @@ impl PeerManager {
         // Remove the oldest entries (but never remove validators)
         let mut removed = 0;
         for (bls_key, _) in entries.iter().take(entries_to_remove * 2) {
-            // both maps should match so entry should exist in known_peers
-            let pubkey = self.known_peers.get(bls_key).unwrap().pubkey.clone();
-            // Don't remove if this is a validator in the current committee
-            if self.is_peer_validator(&pubkey.clone().into()) {
+            // Judge by the BLS key the entry is stored under, not by the network key it names: a
+            // third-party record under any BLS key can name a validator's network key, and
+            // exempting on that would let an attacker pin unevictable entries at will.
+            if self.peers.is_committee_key(bls_key) {
                 continue;
             }
 

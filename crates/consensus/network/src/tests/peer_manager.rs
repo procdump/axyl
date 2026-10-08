@@ -1118,6 +1118,97 @@ async fn test_evicting_a_forged_dial_entry_keeps_the_victims_binding() {
     );
 }
 
+/// The validator exemption from eviction is decided by the BLS key an entry is stored under, not
+/// by the network key it names. A forged entry under the attacker's key naming a committee
+/// member's network key used to inherit the member's exemption, and since any BLS key can store
+/// a record, an attacker could pin as many unevictable entries as it liked and defeat the cap.
+#[tokio::test]
+async fn test_forged_entry_naming_a_validator_is_not_exempt_from_eviction() {
+    let mut peer_manager = create_test_peer_manager(None);
+    let victim_bls = *BlsKeypair::generate(&mut rand::rng()).public();
+    let victim_netkey: NetworkPublicKey = NetworkKeypair::generate_ed25519().public().into();
+    let victim_id: PeerId = victim_netkey.clone().into();
+    let attacker_bls = *BlsKeypair::generate(&mut rand::rng()).public();
+
+    peer_manager.add_known_peer(
+        victim_bls,
+        NetworkInfo {
+            pubkey: victim_netkey.clone(),
+            multiaddrs: vec![create_multiaddr(None)],
+            timestamp: now(),
+        },
+    );
+    peer_manager.new_epoch(HashSet::from([victim_bls]));
+    assert!(peer_manager.is_peer_validator(&victim_id));
+
+    peer_manager.add_known_peer_addrs(
+        attacker_bls,
+        NetworkInfo {
+            pubkey: victim_netkey,
+            multiaddrs: vec![create_multiaddr(None)],
+            timestamp: now(),
+        },
+    );
+    // the forged entry is the oldest, so it is the first candidate for eviction
+    peer_manager.known_peers_time_added.insert(attacker_bls, 0);
+
+    for _ in 0..MAX_KNOWN_PEERS {
+        let bls = *BlsKeypair::generate(&mut rand::rng()).public();
+        let netkey: NetworkPublicKey = NetworkKeypair::generate_ed25519().public().into();
+        peer_manager.add_known_peer_addrs(
+            bls,
+            NetworkInfo {
+                pubkey: netkey,
+                multiaddrs: vec![create_multiaddr(None)],
+                timestamp: now(),
+            },
+        );
+    }
+
+    assert!(
+        peer_manager.auth_to_peer(attacker_bls).is_none(),
+        "naming a validator's network key must not exempt the forged entry from eviction"
+    );
+    assert!(peer_manager.auth_to_peer(victim_bls).is_some(), "the validator's own entry stays");
+    assert_eq!(peer_manager.peer_to_bls(&victim_id), Some(victim_bls));
+}
+
+/// A peer that binds its BLS key again from a new network key leaves exactly one binding. The
+/// binding table is keyed by peer id, so a plain insert kept the old peer id attributed to the
+/// key: `bound_auth_to_peer` then answered either peer id, and a leaked old network key stayed
+/// attributed to its former owner until restart.
+#[tokio::test]
+async fn test_rebinding_from_a_new_network_key_drops_the_old_binding() {
+    let mut peer_manager = create_test_peer_manager(None);
+    let bls = *BlsKeypair::generate(&mut rand::rng()).public();
+    let old_netkey: NetworkPublicKey = NetworkKeypair::generate_ed25519().public().into();
+    let old_id: PeerId = old_netkey.clone().into();
+    let new_netkey: NetworkPublicKey = NetworkKeypair::generate_ed25519().public().into();
+    let new_id: PeerId = new_netkey.clone().into();
+
+    peer_manager.add_known_peer(
+        bls,
+        NetworkInfo {
+            pubkey: old_netkey,
+            multiaddrs: vec![create_multiaddr(None)],
+            timestamp: now(),
+        },
+    );
+    assert_eq!(peer_manager.bound_auth_to_peer(bls), Some(old_id));
+
+    peer_manager.add_known_peer(
+        bls,
+        NetworkInfo {
+            pubkey: new_netkey,
+            multiaddrs: vec![create_multiaddr(None)],
+            timestamp: now() + 1,
+        },
+    );
+    assert_eq!(peer_manager.peer_to_bls(&old_id), None, "the old peer id is no longer attributed");
+    assert_eq!(peer_manager.peer_to_bls(&new_id), Some(bls));
+    assert_eq!(peer_manager.bound_auth_to_peer(bls), Some(new_id));
+}
+
 /// `should_skip_gossip_penalty` must refuse a committee validator: a validator that fails gossipsub
 /// negotiation is a real protocol/version fault to surface, not a peer to quietly reclassify.
 #[tokio::test]
