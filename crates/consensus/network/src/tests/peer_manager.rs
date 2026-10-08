@@ -978,6 +978,86 @@ async fn test_bound_peer_is_never_a_relay_hop_candidate() {
     assert!(!peer_manager.is_relay(&validator_id));
 }
 
+/// A record learned through a third party gives dial addresses but no peer-id binding, and no
+/// target for a penalty: any BLS key can name any network key, so the only proof that a peer id
+/// belongs to a BLS key is the peer delivering its own record over its own connection
+/// (`add_known_peer`). Binding on a third-party claim let one record under an attacker's BLS key
+/// re-map a validator's peer id and get the validator's requests rejected as not from their author.
+#[tokio::test]
+async fn test_third_party_record_gives_addresses_but_no_binding() {
+    let mut peer_manager = create_test_peer_manager(None);
+    let bls = *BlsKeypair::generate(&mut rand::rng()).public();
+    let netkey: NetworkPublicKey = NetworkKeypair::generate_ed25519().public().into();
+    let peer_id: PeerId = netkey.clone().into();
+    let info =
+        NetworkInfo { pubkey: netkey, multiaddrs: vec![create_multiaddr(None)], timestamp: now() };
+
+    // third-party: dialable, not bound, not penalisable through the BLS key
+    peer_manager.add_known_peer_addrs(bls, info.clone());
+    assert_eq!(peer_manager.auth_to_peer(bls).map(|(id, _)| id), Some(peer_id), "dial hint kept");
+    assert_eq!(peer_manager.peer_to_bls(&peer_id), None, "no binding from a third-party record");
+    assert_eq!(peer_manager.bound_auth_to_peer(bls), None, "no penalty target either");
+
+    // the peer's own record over its own connection: bound both ways
+    peer_manager.add_known_peer(bls, info);
+    assert_eq!(peer_manager.peer_to_bls(&peer_id), Some(bls));
+    assert_eq!(peer_manager.bound_auth_to_peer(bls), Some(peer_id));
+}
+
+/// The re-mapping attack against the peer manager directly: a record under the attacker's BLS key
+/// naming the victim's network key. As a third-party claim it must neither bind the victim's peer
+/// id to the attacker's key nor disturb the binding the victim's own record established. And it
+/// must not let the attacker dodge penalties: a penalty for the attacker's key lands on the
+/// connection the attacker bound itself from, not on the victim its record names, and not nowhere.
+#[tokio::test]
+async fn test_third_party_record_cannot_remap_a_bound_peer() {
+    let mut peer_manager = create_test_peer_manager(None);
+    let victim_bls = *BlsKeypair::generate(&mut rand::rng()).public();
+    let victim_netkey: NetworkPublicKey = NetworkKeypair::generate_ed25519().public().into();
+    let victim_id: PeerId = victim_netkey.clone().into();
+    let attacker_bls = *BlsKeypair::generate(&mut rand::rng()).public();
+    let attacker_netkey: NetworkPublicKey = NetworkKeypair::generate_ed25519().public().into();
+    let attacker_id: PeerId = attacker_netkey.clone().into();
+
+    // both connected as themselves and pushed their own records
+    peer_manager.add_known_peer(
+        victim_bls,
+        NetworkInfo {
+            pubkey: victim_netkey.clone(),
+            multiaddrs: vec![create_multiaddr(None)],
+            timestamp: now(),
+        },
+    );
+    peer_manager.add_known_peer(
+        attacker_bls,
+        NetworkInfo {
+            pubkey: attacker_netkey,
+            multiaddrs: vec![create_multiaddr(None)],
+            timestamp: now(),
+        },
+    );
+    assert_eq!(peer_manager.peer_to_bls(&victim_id), Some(victim_bls));
+    assert_eq!(peer_manager.bound_auth_to_peer(attacker_bls), Some(attacker_id));
+
+    // the attacker's newer record, learned through a third party, names the victim's network key
+    peer_manager.add_known_peer_addrs(
+        attacker_bls,
+        NetworkInfo {
+            pubkey: victim_netkey,
+            multiaddrs: vec![create_multiaddr(None)],
+            timestamp: now() + 1,
+        },
+    );
+    assert_eq!(peer_manager.peer_to_bls(&victim_id), Some(victim_bls), "binding untouched");
+    assert_eq!(
+        peer_manager.bound_auth_to_peer(attacker_bls),
+        Some(attacker_id),
+        "a penalty for the attacker's key must land on the attacker's own connection"
+    );
+    // the dial entry follows the claim, which costs whoever dials it a failed handshake
+    assert_eq!(peer_manager.auth_to_peer(attacker_bls).map(|(id, _)| id), Some(victim_id));
+}
+
 /// `should_skip_gossip_penalty` must refuse a committee validator: a validator that fails gossipsub
 /// negotiation is a real protocol/version fault to surface, not a peer to quietly reclassify.
 #[tokio::test]
