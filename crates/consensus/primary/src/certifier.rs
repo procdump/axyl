@@ -477,32 +477,32 @@ impl<DB: Database> Certifier<DB> {
                 // the wedge window, or one two or more epochs behind, still counts.
                 // The proposal is aborted either way: peers at the next epoch will never vote
                 // for a header of this one.
-                if VoteFailureTracker::is_one_epoch_behind(*peer_epoch, *our_epoch) {
-                    let cert_store_round = *self.consensus_bus.cert_store_round().borrow();
-                    let committed_round = *self.consensus_bus.committed_round_updates().borrow();
-                    if self.vote_failures.skip_while_progressing(
+                let cert_store_round = *self.consensus_bus.cert_store_round().borrow();
+                let committed_round = *self.consensus_bus.committed_round_updates().borrow();
+                if VoteFailureTracker::is_one_epoch_behind(*peer_epoch, *our_epoch)
+                    && self.vote_failures.skip_while_progressing(
                         cert_store_round,
                         committed_round,
                         Self::TOO_OLD_WEDGE_WINDOW,
-                    ) {
-                        warn!(
-                            target: "primary::certifier",
-                            auth=?self.authority_id,
-                            peer=?peer_id,
-                            peer_epoch, our_epoch, cert_store_round, committed_round,
-                            "ignoring epoch rejection at the epoch boundary: DAG still progressing, own transition pending"
-                        );
-                        self.consensus_bus
-                            .consensus_metrics()
-                            .vote_request_rejections
-                            .with_label_values(&[&peer_id.to_string(), "epoch_mismatch_skipped"])
-                            .inc();
-                        return VoteErrorAction::Abort(DagError::EpochRejectedByPeer {
-                            peer_id: peer_id.clone(),
-                            peer_epoch: *peer_epoch,
-                            our_epoch: *our_epoch,
-                        });
-                    }
+                    )
+                {
+                    warn!(
+                        target: "primary::certifier",
+                        auth=?self.authority_id,
+                        peer=?peer_id,
+                        peer_epoch, our_epoch, cert_store_round, committed_round,
+                        "ignoring epoch rejection at the epoch boundary: DAG still progressing, own transition pending"
+                    );
+                    self.consensus_bus
+                        .consensus_metrics()
+                        .vote_request_rejections
+                        .with_label_values(&[&peer_id.to_string(), "epoch_mismatch_skipped"])
+                        .inc();
+                    return VoteErrorAction::Abort(DagError::EpochRejectedByPeer {
+                        peer_id: peer_id.clone(),
+                        peer_epoch: *peer_epoch,
+                        our_epoch: *our_epoch,
+                    });
                 }
 
                 let outcome = self.vote_failures.record_epoch_mismatch(peer_id.clone());
@@ -515,7 +515,7 @@ impl<DB: Database> Certifier<DB> {
                     target: "primary::certifier",
                     auth=?self.authority_id,
                     peer=?peer_id,
-                    peer_epoch, our_epoch,
+                    peer_epoch, our_epoch, cert_store_round, committed_round,
                     count = self.vote_failures.epoch_mismatch_count(),
                     threshold = self.vote_failures.threshold(),
                     "peer rejected header as wrong epoch"
