@@ -137,6 +137,15 @@ impl VoteFailureTracker {
         peer_epoch >= our_epoch
     }
 
+    /// True when we are exactly one epoch behind the peer: we are at the epoch boundary and our
+    /// own epoch manager will transition us as soon as the boundary output commits. A rejection
+    /// in that state is gated on DAG progress like a too-old one (see `skip_while_progressing`).
+    /// Two or more epochs behind means we are genuinely far behind, and the rejection counts
+    /// immediately.
+    pub(crate) fn is_one_epoch_behind(peer_epoch: Epoch, our_epoch: Epoch) -> bool {
+        peer_epoch.checked_sub(our_epoch) == Some(1)
+    }
+
     pub(crate) fn too_old_count(&self) -> usize {
         self.inner.lock().expect("vote failure tracker mutex poisoned").too_old.len()
     }
@@ -200,6 +209,18 @@ mod tests {
         assert!(VoteFailureTracker::should_count_epoch_rejection(15, 15));
         // peer at newer epoch should count (we may be the stale one).
         assert!(VoteFailureTracker::should_count_epoch_rejection(20, 15));
+    }
+
+    #[test]
+    fn one_epoch_behind_is_exactly_one() {
+        // peer just closed the epoch we are still finishing
+        assert!(VoteFailureTracker::is_one_epoch_behind(771, 770));
+        // same epoch (a wrong-epoch rejection from a peer at our epoch): not behind
+        assert!(!VoteFailureTracker::is_one_epoch_behind(770, 770));
+        // two or more epochs: genuinely behind, counts immediately
+        assert!(!VoteFailureTracker::is_one_epoch_behind(772, 770));
+        // peer behind us: filtered earlier as stale anyway
+        assert!(!VoteFailureTracker::is_one_epoch_behind(769, 770));
     }
 
     #[test]
