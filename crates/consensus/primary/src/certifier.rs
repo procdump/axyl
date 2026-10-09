@@ -149,6 +149,9 @@ impl<DB: Database> Certifier<DB> {
     /// Invariant: a node that keeps writing or committing certificates, however far behind,
     /// is never demoted through this path. The active-mode fetcher is what closes the gap
     /// either way; demotion would only add the CvvInactive catch-up burst.
+    ///
+    /// Also gates epoch-mismatch rejections when we are one epoch behind the peer (at the
+    /// boundary, about to transition on our own); see `handle_vote_error`.
     const TOO_OLD_WEDGE_WINDOW: Duration = Duration::from_secs(30);
 
     /// Rayls: Request a vote for a header, retrying up to MAX_VOTE_REQUEST_ATTEMPTS times.
@@ -471,6 +474,42 @@ impl<DB: Database> Certifier<DB> {
                         .with_label_values(&[&peer_id.to_string(), "epoch_mismatch_stale"])
                         .inc();
                     return VoteErrorAction::Continue;
+                }
+
+                // One epoch behind the peer means we are at the boundary: our own epoch manager
+                // transitions us the moment the boundary output commits, typically within a
+                // second or two of the peers. While the DAG is still progressing that commit is
+                // on its way, and demoting would only route the epoch change through a
+                // CvvInactive teardown. Same gate as the too-old path; a node that stalls for
+                // the wedge window, or one two or more epochs behind, still counts.
+                // The proposal is aborted either way: peers at the next epoch will never vote
+                // for a header of this one.
+                if VoteFailureTracker::is_one_epoch_behind(*peer_epoch, *our_epoch) {
+                    let cert_store_round = *self.consensus_bus.cert_store_round().borrow();
+                    let committed_round = *self.consensus_bus.committed_round_updates().borrow();
+                    if self.vote_failures.skip_while_progressing(
+                        cert_store_round,
+                        committed_round,
+                        Self::TOO_OLD_WEDGE_WINDOW,
+                    ) {
+                        warn!(
+                            target: "primary::certifier",
+                            auth=?self.authority_id,
+                            peer=?peer_id,
+                            peer_epoch, our_epoch, cert_store_round, committed_round,
+                            "ignoring epoch rejection at the epoch boundary: DAG still progressing, own transition pending"
+                        );
+                        self.consensus_bus
+                            .consensus_metrics()
+                            .vote_request_rejections
+                            .with_label_values(&[&peer_id.to_string(), "epoch_mismatch_skipped"])
+                            .inc();
+                        return VoteErrorAction::Abort(DagError::EpochRejectedByPeer {
+                            peer_id: peer_id.clone(),
+                            peer_epoch: *peer_epoch,
+                            our_epoch: *our_epoch,
+                        });
+                    }
                 }
 
                 let outcome = self.vote_failures.record_epoch_mismatch(peer_id.clone());
