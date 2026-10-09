@@ -419,13 +419,6 @@ impl<DB: Database> Certifier<DB> {
                         .inc();
                     return VoteErrorAction::Continue;
                 }
-                warn!(
-                    target: "primary::certifier",
-                    auth=?self.authority_id,
-                    peer=?peer_id,
-                    header_round, limit_round, cert_store_round, committed_round,
-                    "too-old rejection with no DAG progress for the wedge window; counting toward demotion"
-                );
                 let outcome = self.vote_failures.record_too_old(peer_id.clone());
                 self.consensus_bus
                     .consensus_metrics()
@@ -436,10 +429,10 @@ impl<DB: Database> Certifier<DB> {
                     target: "primary::certifier",
                     auth=?self.authority_id,
                     peer=?peer_id,
-                    header_round, limit_round,
+                    header_round, limit_round, cert_store_round, committed_round,
                     count = self.vote_failures.too_old_count(),
                     threshold = self.vote_failures.threshold(),
-                    "peer rejected header as too old"
+                    "peer rejected header as too old with no DAG progress for the wedge window; counting toward demotion"
                 );
                 match outcome {
                     RejectionOutcome::BelowThreshold => VoteErrorAction::Continue,
