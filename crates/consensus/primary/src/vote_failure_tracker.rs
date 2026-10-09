@@ -28,9 +28,10 @@ pub(crate) enum RejectionOutcome {
 struct Inner {
     too_old: BTreeSet<AuthorityIdentifier>,
     epoch_mismatch: BTreeSet<AuthorityIdentifier>,
-    /// Highest committed round seen while skipping a cert-covered too-old rejection, and when it
-    /// last advanced. Lets `skip_cert_covered` tell a transient proposer lag (DAG still
-    /// committing) from a genuine wedge (cert store ahead but committed round stalled).
+    /// Highest cert-store and committed rounds seen while evaluating a too-old rejection, and
+    /// when either last advanced. Lets `skip_while_progressing` tell a transient lag (certs
+    /// still arriving, DAG still committing) from a genuine wedge (nothing moves).
+    last_cert_store_round: Round,
     last_committed_round: Round,
     last_progress_at: Instant,
 }
@@ -51,7 +52,12 @@ impl VoteFailureTracker {
             inner: Arc::new(Mutex::new(Inner {
                 too_old: BTreeSet::new(),
                 epoch_mismatch: BTreeSet::new(),
+                last_cert_store_round: Round::default(),
                 last_committed_round: Round::default(),
+                // Deliberate: the first too-old rejection after construction is skipped for a
+                // full wedge window even if no round has been observed yet, which acts as a
+                // startup grace. It stacks with the explicit `grace_deadline` on non-initial
+                // epochs; both are set at the same moment.
                 last_progress_at: Instant::now(),
             })),
             threshold: committee_size / 2,
@@ -59,19 +65,35 @@ impl VoteFailureTracker {
         }
     }
 
-    /// For a too-old rejection where we already hold the certs for the peer's `limit_round`, decide
-    /// whether to SKIP it (not count it toward demotion).
+    /// For a too-old rejection, decide whether to SKIP it (not count it toward demotion).
     ///
-    /// We skip while the DAG is still making progress (the committed round is advancing): the
-    /// rejection then reflects a transient proposer stall — our certs are arriving but not yet
-    /// usable as parents — and demoting would only flap. If the committed round has NOT advanced
-    /// for `wedge_window`, the proposer is genuinely wedged despite holding the certs, so we
-    /// stop skipping and let the rejection accumulate toward a demote (whose rejoin re-primes
-    /// consensus).
-    pub(crate) fn skip_cert_covered(&self, committed_round: Round, wedge_window: Duration) -> bool {
+    /// We skip while our own DAG is still making progress: certificates are being written
+    /// (`cert_store_round` advancing) or committed (`committed_round` advancing). A rejection
+    /// then reflects a transient lag — a lost gossip message being fetched, parents arriving but
+    /// not yet usable — and demoting would only tear down the epoch tasks for something that
+    /// resolves within seconds. Only if neither round has advanced for `wedge_window` is the
+    /// node genuinely wedged, so we stop skipping and let the rejection accumulate toward a
+    /// demote (whose rejoin re-primes consensus).
+    ///
+    /// The check is on local progress, not on a timer: a wedged node falls through as soon as
+    /// the window expires, while a recovering node is never counted.
+    pub(crate) fn skip_while_progressing(
+        &self,
+        cert_store_round: Round,
+        committed_round: Round,
+        wedge_window: Duration,
+    ) -> bool {
         let mut guard = self.inner.lock().expect("vote failure tracker mutex poisoned");
+        let mut progressed = false;
+        if cert_store_round > guard.last_cert_store_round {
+            guard.last_cert_store_round = cert_store_round;
+            progressed = true;
+        }
         if committed_round > guard.last_committed_round {
             guard.last_committed_round = committed_round;
+            progressed = true;
+        }
+        if progressed {
             guard.last_progress_at = Instant::now();
             true
         } else {
@@ -211,31 +233,55 @@ mod tests {
     }
 
     #[test]
-    fn skip_cert_covered_skips_while_committed_round_advances() {
+    fn skip_while_committed_round_advances() {
         let tracker = VoteFailureTracker::new(4, None);
         let window = std::time::Duration::from_secs(30);
         // committed round advancing => transient proposer lag => skip (don't demote)
-        assert!(tracker.skip_cert_covered(10, window));
-        assert!(tracker.skip_cert_covered(11, window));
-        assert!(tracker.skip_cert_covered(12, window));
+        assert!(tracker.skip_while_progressing(20, 10, window));
+        assert!(tracker.skip_while_progressing(20, 11, window));
+        assert!(tracker.skip_while_progressing(20, 12, window));
     }
 
     #[test]
-    fn skip_cert_covered_tolerates_brief_stall_within_window() {
+    fn skip_while_cert_store_round_advances_alone() {
+        let tracker = VoteFailureTracker::new(4, None);
+        // setup only: seed both baselines so the asserts below exercise store-only progress
+        let _ = tracker.skip_while_progressing(20, 10, std::time::Duration::ZERO);
+        // certs are being written (a fetch is landing) even though nothing commits yet:
+        // that is progress, never count the rejection
+        assert!(tracker.skip_while_progressing(21, 10, std::time::Duration::ZERO));
+        assert!(tracker.skip_while_progressing(22, 10, std::time::Duration::ZERO));
+        assert!(tracker.skip_while_progressing(23, 10, std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn skip_tolerates_brief_stall_within_window() {
         let tracker = VoteFailureTracker::new(4, None);
         let window = std::time::Duration::from_secs(30);
-        assert!(tracker.skip_cert_covered(10, window));
-        // committed round stalled, but well within the wedge window => still skip
-        assert!(tracker.skip_cert_covered(10, window));
+        assert!(tracker.skip_while_progressing(20, 10, window));
+        // nothing advanced, but well within the wedge window => still skip
+        assert!(tracker.skip_while_progressing(20, 10, window));
     }
 
     #[test]
-    fn skip_cert_covered_stops_skipping_when_wedged() {
+    fn skip_stops_when_wedged() {
         let tracker = VoteFailureTracker::new(4, None);
-        // first call establishes progress at round 10
-        assert!(tracker.skip_cert_covered(10, std::time::Duration::ZERO));
-        // committed round has not advanced and the (zero) wedge window has elapsed =>
-        // genuinely wedged despite holding certs => stop skipping so it can demote
-        assert!(!tracker.skip_cert_covered(10, std::time::Duration::ZERO));
+        // first call establishes progress
+        assert!(tracker.skip_while_progressing(20, 10, std::time::Duration::ZERO));
+        // neither round advanced and the (zero) wedge window has elapsed =>
+        // genuinely wedged => stop skipping so the rejection counts toward demotion
+        assert!(!tracker.skip_while_progressing(20, 10, std::time::Duration::ZERO));
+        // a lower value is not progress either
+        assert!(!tracker.skip_while_progressing(19, 9, std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn wedged_node_still_demotes_at_threshold() {
+        let tracker = VoteFailureTracker::new(4, None);
+        assert!(tracker.skip_while_progressing(20, 10, std::time::Duration::ZERO));
+        assert!(!tracker.skip_while_progressing(20, 10, std::time::Duration::ZERO));
+        // the caller now records instead of skipping: threshold still works as before
+        assert!(matches!(tracker.record_too_old(peer(1)), RejectionOutcome::BelowThreshold));
+        assert!(matches!(tracker.record_too_old(peer(2)), RejectionOutcome::TransitionToInactive));
     }
 }
