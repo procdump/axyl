@@ -194,8 +194,12 @@ pub const MAINNET_LOAD_BALANCING_BLOCK: u64 = 893_558;
 /// Load Balancing activation block on local network.
 pub const LOCAL_LOAD_BALANCING_BLOCK: u64 = 0;
 
-/// Sender-affinity load balancing activation block on local network. Real networks stay `Never`
-/// until an activation block is chosen operationally.
+/// Sender-affinity load balancing activation block on Rayls testnet.
+pub const TESTNET_SENDER_AFFINITY_LOAD_BALANCING_BLOCK: u64 = 17_300_000;
+/// Sender-affinity load balancing activation block on Rayls mainnet.
+pub const MAINNET_SENDER_AFFINITY_LOAD_BALANCING_BLOCK: u64 = 12_231_705;
+/// Sender-affinity load balancing activation block on local network. Devnet stays `Never` until
+/// an activation block is chosen operationally.
 pub const LOCAL_SENDER_AFFINITY_LOAD_BALANCING_BLOCK: u64 = 0;
 
 // NOTE: UsdrSupplyCorrection is active on local and mainnet; testnet/devnet
@@ -242,6 +246,12 @@ pub const LOCAL_DYNAMIC_COMMITTEE_SIZING_BLOCK: u64 = 0;
 /// deploys the pre-hybrid ConsensusRegistry, and the in-place bytecode-swap migration runs at
 /// the first post-genesis block, after which epoch closes use the hybrid `applyIncentives` ABI.
 pub const LOCAL_HYBRID_REWARDS_BLOCK: u64 = 1;
+
+/// OutputSeqNormalization activation block on the Rayls testnet.
+pub const TESTNET_OUTPUT_SEQ_NORMALIZATION_BLOCK: u64 = 17_300_000;
+
+/// OutputSeqNormalization activation block on the Rayls mainnet.
+pub const MAINNET_OUTPUT_SEQ_NORMALIZATION_BLOCK: u64 = 12_231_705;
 
 /// OutputSeqNormalization activation block on the local network.
 pub const LOCAL_OUTPUT_SEQ_NORMALIZATION_BLOCK: u64 = 0;
@@ -358,9 +368,14 @@ impl RaylsHardFork {
             ),
             // Never until SRE schedules a concrete testnet activation block.
             ScheduledFork::new(Self::HybridRewards, ForkCondition::Never),
-            ScheduledFork::new(Self::OutputSeqNormalization, ForkCondition::Never),
-            // Never until an operational activation block is chosen; the mechanism ships dormant.
-            ScheduledFork::new(Self::SenderAffinityLoadBalancing, ForkCondition::Never),
+            ScheduledFork::new(
+                Self::OutputSeqNormalization,
+                ForkCondition::Block(TESTNET_OUTPUT_SEQ_NORMALIZATION_BLOCK),
+            ),
+            ScheduledFork::new(
+                Self::SenderAffinityLoadBalancing,
+                ForkCondition::Block(TESTNET_SENDER_AFFINITY_LOAD_BALANCING_BLOCK),
+            ),
             // Never until SRE schedules an activation block: changes epoch-closing block hashes.
             ScheduledFork::new(Self::EpochCloseSeedV2, ForkCondition::Never),
         ]
@@ -405,10 +420,14 @@ impl RaylsHardFork {
             // Never until SRE schedules a concrete mainnet activation block (the reward-fairness
             // rollout for #633); the in-place migration re-links BlsG1 from the live contract.
             ScheduledFork::new(Self::HybridRewards, ForkCondition::Never),
-            // Never until SRE schedules a concrete mainnet activation block.
-            ScheduledFork::new(Self::OutputSeqNormalization, ForkCondition::Never),
-            // Never until an operational activation block is chosen; the mechanism ships dormant.
-            ScheduledFork::new(Self::SenderAffinityLoadBalancing, ForkCondition::Never),
+            ScheduledFork::new(
+                Self::OutputSeqNormalization,
+                ForkCondition::Block(MAINNET_OUTPUT_SEQ_NORMALIZATION_BLOCK),
+            ),
+            ScheduledFork::new(
+                Self::SenderAffinityLoadBalancing,
+                ForkCondition::Block(MAINNET_SENDER_AFFINITY_LOAD_BALANCING_BLOCK),
+            ),
             // Never until SRE schedules an activation block: changes epoch-closing block hashes.
             ScheduledFork::new(Self::EpochCloseSeedV2, ForkCondition::Never),
         ]
