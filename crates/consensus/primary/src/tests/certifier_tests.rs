@@ -639,11 +639,10 @@ fn rejections_with_reason(cb: &ConsensusBus, peers: &[AuthorityIdentifier], reas
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn too_old_rejections_do_not_demote_within_the_wedge_window() {
+async fn too_old_rejections_do_not_demote_within_the_rejection_grace() {
     // Three proposals, each rejected as too old by a different peer (threshold is 2 of 4),
-    // while the node is inside its progress window and its cert store is below the peer's
-    // limit: the case that used to demote on the spot. Expect no demotion and every rejection
-    // counted as skipped.
+    // all within the rejection grace: the case that used to demote on the spot. Expect
+    // no demotion and every rejection counted as skipped.
     let (cb, peers, _tm) = propose_and_reject(3, |header| PrimaryResponse::TooOld {
         header_round: header.round(),
         limit_round: header.round() + 5,
@@ -652,14 +651,14 @@ async fn too_old_rejections_do_not_demote_within_the_wedge_window() {
 
     assert!(
         cb.mode_transition().borrow().is_none(),
-        "too-old rejections demoted a progressing node"
+        "too-old rejections demoted a node inside the rejection grace"
     );
     assert_eq!(rejections_with_reason(&cb, &peers, "too_old_skipped"), 3);
     assert_eq!(rejections_with_reason(&cb, &peers, "too_old"), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn one_epoch_behind_rejections_do_not_demote_within_the_wedge_window() {
+async fn one_epoch_behind_rejections_do_not_demote_within_the_rejection_grace() {
     // Three proposals, each rejected by a different peer that is one epoch ahead: we are at
     // the boundary and will transition on our own. Expect no demotion and every rejection
     // counted as skipped.
@@ -671,7 +670,7 @@ async fn one_epoch_behind_rejections_do_not_demote_within_the_wedge_window() {
 
     assert!(
         cb.mode_transition().borrow().is_none(),
-        "epoch-boundary rejections demoted a progressing node"
+        "epoch-boundary rejections demoted a node inside the rejection grace"
     );
     assert_eq!(rejections_with_reason(&cb, &peers, "epoch_mismatch_skipped"), 3);
     assert_eq!(rejections_with_reason(&cb, &peers, "epoch_mismatch"), 0);

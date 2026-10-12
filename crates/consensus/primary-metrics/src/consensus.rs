@@ -58,10 +58,10 @@ pub struct ConsensusMetrics {
     /// `epoch_mismatch_skipped` | `epoch_mismatch_stale`). Node-local: high totals mean this node
     /// is falling behind and being rejected by the committee. The `*_skipped` / `*_stale` variants
     /// are rejections that were *not* counted toward peer demotion: a too-old rejection, or an
-    /// epoch rejection while one epoch behind, received while the DAG was still progressing (the
-    /// cert-store round or the committed round advanced within the wedge window), or an epoch
-    /// rejection from a peer that is itself stale — tracked under distinct reasons so the raw
-    /// rejection rate stays visible.
+    /// epoch rejection while one epoch behind, received while the node was still within its
+    /// rejection grace (it had certified a header of its own less than the grace ago),
+    /// or an epoch rejection from a peer that is itself stale — tracked under distinct reasons so
+    /// the raw rejection rate stays visible.
     pub vote_request_rejections: IntCounterVec,
     /// Size of the committee for the current epoch.
     pub committee_size: IntGauge,
