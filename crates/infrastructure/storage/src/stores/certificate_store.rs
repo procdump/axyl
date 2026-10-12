@@ -307,7 +307,11 @@ impl<DB: Database> CertificateStore for DB {
         match scope {
             CertScope::Current => self.next_round_number(origin, round),
             CertScope::PrevEpoch => self.with_read_txn(|txn| {
-                let key = (origin.clone(), round + 1);
+                // same guard as `next_round_number`: the round can come from a peer's request
+                let Some(next) = round.checked_add(1) else {
+                    return Ok(None);
+                };
+                let key = (origin.clone(), next);
                 if let Some(((name, round), _)) =
                     txn.skip_to::<PrevEpochCertificateDigestByOrigin>(&key)?.next()
                 {
@@ -543,9 +547,14 @@ impl<DB: Database> CertificateStore for DB {
         origin: &AuthorityIdentifier,
         round: Round,
     ) -> StoreResult<Option<Round>> {
+        // `round` can come from a peer's fetch request: at the top of the range there is nothing
+        // above, and a plain `+ 1` would abort the node (overflow checks are on in release).
+        let Some(next) = round.checked_add(1) else {
+            return Ok(None);
+        };
         // Use with_read_txn to ensure MDBX can reclaim dirty pages after the iterator completes
         self.with_read_txn(|txn| {
-            let key = (origin.clone(), round + 1);
+            let key = (origin.clone(), next);
             if let Some(((name, round), _)) = txn.skip_to::<CertificateDigestByOrigin>(&key)?.next()
             {
                 if &name == origin {
@@ -628,6 +637,17 @@ mod prev_epoch_tail_tests {
         assert_eq!(db.next_round_number_in(CertScope::PrevEpoch, &a0, 2).expect("next"), Some(3));
         assert_eq!(db.next_round_number_in(CertScope::PrevEpoch, &a0, 3).expect("next"), Some(4));
         assert_eq!(db.next_round_number_in(CertScope::PrevEpoch, &a0, 4).expect("next"), None);
+
+        // a walk starting at the top of the round range (a crafted request can send it) must
+        // answer "nothing above" instead of overflowing
+        assert_eq!(
+            db.next_round_number_in(CertScope::PrevEpoch, &a0, Round::MAX).expect("next"),
+            None
+        );
+        assert_eq!(
+            db.next_round_number_in(CertScope::Current, &a0, Round::MAX).expect("next"),
+            None
+        );
 
         // the next transition replaces the tail
         db.with_write_txn(|txn| write_prev_epoch_tail(txn, &[])).expect("replace tail");
