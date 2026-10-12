@@ -727,7 +727,7 @@ async fn test_fetch_certificates_handler() {
             )
             .expect("boundary set")
             .set_max_response_size(response_size);
-        let resp = handler.retrieve_missing_certs(missing_req).await.unwrap();
+        let resp = handler.retrieve_missing_certs(missing_req, None).await.unwrap();
         if let PrimaryResponse::RequestedCertificates(certs) = resp {
             assert_eq!(certs.iter().map(|cert| cert.round()).collect::<Vec<_>>(), *expected_rounds);
         } else {
@@ -748,7 +748,7 @@ async fn test_fetch_certificates_handler() {
             )
             .expect("boundary set")
             .set_max_response_size(0);
-        let resp = handler.retrieve_missing_certs(too_big).await;
+        let resp = handler.retrieve_missing_certs(too_big, None).await;
         assert!(resp.is_err());
     }
 }

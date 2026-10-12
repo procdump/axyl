@@ -3,7 +3,10 @@ use crate::{
     types::EngineToPrimaryRpc, worker::WorkerNode,
 };
 use eyre::eyre;
-use rayls_execution_evm::system_calls::EpochState;
+use rayls_execution_evm::{
+    chainspec::{RaylsHardFork, RaylsHardforks as _},
+    system_calls::EpochState,
+};
 use rayls_infrastructure_config::{ConsensusConfig, NetworkConfig, RaylsDirs};
 use rayls_infrastructure_types::{
     gas_accumulator::GasAccumulator, BlsPublicKey, CommitteeLookahead, Database as ReDatabase,
@@ -105,6 +108,14 @@ where
         }
         let lookahead = CommitteeLookahead::from_entries(lookahead_entries);
 
+        // the certificate fetcher gates the request variant it sends on this fork, against the
+        // executed tip it already tracks
+        let certificate_fetch_epoch_v2_block = engine
+            .get_reth_env()
+            .await
+            .rayls_chain_spec()
+            .rayls_fork_activation_block(RaylsHardFork::CertificateFetchEpochV2);
+
         // create config for consensus
         let consensus_config = ConsensusConfig::new_for_epoch(
             self.builder.rayls_infrastructure_config.clone(),
@@ -115,7 +126,8 @@ where
             network_config.clone(),
             epoch_boundary,
             self.initial_epoch,
-        )?;
+        )?
+        .with_certificate_fetch_epoch_v2_block(certificate_fetch_epoch_v2_block);
 
         Ok((consensus_config, next_vals.into_iter().collect()))
     }

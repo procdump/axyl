@@ -1,9 +1,15 @@
 //! State sync tests for primaries.
 
 use crate::{network::MissingCertificatesRequest, state_sync::CertificateCollector};
-use rayls_infrastructure_storage::{mem_db::MemDatabase, CertificateStore};
+use rayls_infrastructure_storage::{
+    live_tail,
+    mem_db::MemDatabase,
+    tables::{CertificateDigestByOrigin, CertificateDigestByRound, Certificates},
+    write_prev_epoch_tail, CertScope, CertificateStore,
+};
 use rayls_infrastructure_types::{
-    encode, AuthorityIdentifier, Certificate, Hash as _, SignatureVerificationState,
+    encode, AuthorityIdentifier, Certificate, Database as _, DbTxMut as _, Hash as _,
+    SignatureVerificationState,
 };
 use rayls_testing_test_utils_committee::CommitteeFixture;
 use std::{collections::BTreeSet, num::NonZeroUsize};
@@ -100,8 +106,9 @@ fn test_certificate_iterator() {
 
         // collect from database
         let mut missing = Vec::new();
-        let collector = CertificateCollector::new(req, consensus_config.clone())
-            .expect("certificate collector process valid request");
+        let collector =
+            CertificateCollector::new(req, consensus_config.clone(), CertScope::Current)
+                .expect("certificate collector process valid request");
 
         // Collect certificates from iterator
         for certs in collector {
@@ -128,8 +135,9 @@ fn test_certificate_iterator() {
 
         // collect from database
         let mut missing = Vec::new();
-        let collector = CertificateCollector::new(req, consensus_config.clone())
-            .expect("certificate collector process valid request");
+        let collector =
+            CertificateCollector::new(req, consensus_config.clone(), CertScope::Current)
+                .expect("certificate collector process valid request");
 
         // Collect certificates from iterator
         for certs in collector {
@@ -140,4 +148,75 @@ fn test_certificate_iterator() {
         // NOTE: the expected_rounds tests requestor's limits are respected
         assert!(missing.iter().map(|cert| cert.round()).collect::<Vec<u32>>() >= expected_rounds);
     }
+}
+
+/// The tail kept at the epoch clear serves a previous-epoch fetch after the live tables are gone.
+#[test]
+fn prev_epoch_tail_serves_after_clear() {
+    let fixture = CommitteeFixture::builder(MemDatabase::default)
+        .randomize_ports(true)
+        .committee_size(NonZeroUsize::new(4).unwrap())
+        .build();
+    let primary = fixture.authorities().next().expect("primary in committee fixture");
+    let consensus_config = primary.consensus_config();
+    let store = consensus_config.node_storage().clone();
+
+    // four full rounds of certificates, every authority in every round
+    let mut parents: BTreeSet<_> =
+        Certificate::genesis(&fixture.committee()).into_iter().map(|cert| cert.digest()).collect();
+    let mut certificates = vec![];
+    for round in 1..=4 {
+        let (_, headers) = fixture.headers_round(round - 1, &parents);
+        let round_certs: Vec<_> = headers.iter().map(|h| fixture.certificate(h)).collect();
+        parents = round_certs.iter().map(|c| c.digest()).collect();
+        certificates.extend(round_certs);
+    }
+    for mut cert in certificates.clone() {
+        cert.set_signature_verification_state(SignatureVerificationState::VerifiedDirectly(
+            cert.aggregated_signature().expect("Invalid Signature"),
+        ));
+        store.write(cert).expect("write certificate");
+    }
+    let authorities: Vec<AuthorityIdentifier> =
+        fixture.authorities().map(|a| a.authority().id()).collect();
+
+    // what the transition does: read the last two rounds, write them as the tail and clear the
+    // live tables in one transaction
+    let tail = live_tail(&store, 2).expect("read tail");
+    assert_eq!(tail.len(), 8, "two rounds of four authorities");
+    store
+        .with_write_txn(|txn| {
+            write_prev_epoch_tail(txn, &tail)?;
+            txn.clear_table::<Certificates>()?;
+            txn.clear_table::<CertificateDigestByRound>()?;
+            txn.clear_table::<CertificateDigestByOrigin>()
+        })
+        .expect("write tail and clear live tables");
+
+    let request = |scope_rounds: u32| {
+        MissingCertificatesRequest::default()
+            .set_bounds(
+                scope_rounds,
+                authorities.iter().cloned().map(|a| (a, BTreeSet::new())).collect(),
+            )
+            .expect("bounds within range")
+            .set_max_response_size(usize::MAX)
+    };
+    let collect = |scope: CertScope, lower_bound: u32| -> Vec<u32> {
+        CertificateCollector::new(request(lower_bound), consensus_config.clone(), scope)
+            .expect("valid request")
+            .map(|c| c.expect("cert recovered correctly").round())
+            .collect()
+    };
+
+    // the live tables are empty, the tail still has rounds 3 and 4
+    assert!(collect(CertScope::Current, 0).is_empty());
+    assert_eq!(collect(CertScope::PrevEpoch, 0), vec![3, 3, 3, 3, 4, 4, 4, 4]);
+    // bounds apply to the tail as they do to the live tables
+    assert_eq!(collect(CertScope::PrevEpoch, 3), vec![4, 4, 4, 4]);
+    // round 2 was not kept
+    assert!(store
+        .read_by_index_in(CertScope::PrevEpoch, &authorities[0], 2)
+        .expect("read")
+        .is_none());
 }

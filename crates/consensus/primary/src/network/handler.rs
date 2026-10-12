@@ -17,7 +17,7 @@ use parking_lot::Mutex;
 use rayls_consensus_network::GossipMessage;
 use rayls_infrastructure_config::{ConsensusConfig, LibP2pConfig};
 use rayls_infrastructure_storage::{
-    tables::ConsensusBlocks, ConsensusStore, EpochStore, ProposerStore, VoteDigestStore,
+    tables::ConsensusBlocks, CertScope, ConsensusStore, EpochStore, ProposerStore, VoteDigestStore,
 };
 use rayls_infrastructure_types::{
     ensure,
@@ -805,10 +805,11 @@ where
     pub(crate) async fn retrieve_missing_certs(
         &self,
         request: MissingCertificatesRequest,
+        requested_epoch: Option<Epoch>,
     ) -> PrimaryNetworkResult<PrimaryResponse> {
         let consensus_config = self.consensus_config.clone();
         tokio::task::spawn_blocking(move || {
-            collect_missing_certs_blocking(request, consensus_config)
+            collect_missing_certs_blocking(request, requested_epoch, consensus_config)
         })
         .await
         .map_err(|e| PrimaryNetworkError::Internal(format!("cert-collector join error: {e}")))?
@@ -932,9 +933,23 @@ where
 /// Run the cert-collector synchronously inside `spawn_blocking`.
 fn collect_missing_certs_blocking<DB: Database>(
     request: MissingCertificatesRequest,
+    requested_epoch: Option<Epoch>,
     consensus_config: ConsensusConfig<DB>,
 ) -> PrimaryNetworkResult<PrimaryResponse> {
-    let mut collector = CertificateCollector::new(request, consensus_config)?;
+    let our_epoch = consensus_config.committee().epoch();
+    let Some(scope) = fetch_scope(requested_epoch, our_epoch) else {
+        // Either the requester is ahead of us (it closed an epoch we are still finishing, routine
+        // around every boundary) or it asks for an epoch older than the one we kept the tail of.
+        // Neither is served from here; the requester moves on to the next peer.
+        info!(
+            target: "cert-collector",
+            requested_epoch = ?requested_epoch,
+            our_epoch,
+            "missing-certificates request outside our epoch and the kept tail; answering empty"
+        );
+        return Ok(PrimaryResponse::RequestedCertificates(vec![]));
+    };
+    let mut collector = CertificateCollector::new(request, consensus_config, scope)?;
 
     let mut missing = Vec::new();
     for cert in collector.by_ref() {
@@ -955,6 +970,19 @@ fn collect_missing_certs_blocking<DB: Database>(
     );
 
     Ok(PrimaryResponse::RequestedCertificates(missing))
+}
+
+/// Which certificate tables answer a missing-certificates request for `requested` when we are at
+/// `our_epoch`: the live tables for our own epoch (or an unspecified one, from an older
+/// requester), the kept tail for the epoch we just closed, nothing for anything older.
+pub(crate) fn fetch_scope(requested: Option<Epoch>, our_epoch: Epoch) -> Option<CertScope> {
+    match requested {
+        None => Some(CertScope::Current),
+        Some(epoch) if epoch == our_epoch => Some(CertScope::Current),
+        // the requester is still finishing the epoch we just closed
+        Some(epoch) if our_epoch.checked_sub(1) == Some(epoch) => Some(CertScope::PrevEpoch),
+        Some(_) => None,
+    }
 }
 
 /// Returns true when local execution has a block at `target.number` whose hash diverges from

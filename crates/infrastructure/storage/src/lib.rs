@@ -18,7 +18,8 @@ use tables::{
     CertificateDigestByRound, Certificates, ConsensusBlockNumbersByDigest, ConsensusBlocks,
     ConsensusBlocksCache, EpochCerts, EpochRecords, EpochRecordsIndex, EpochTransitionCheckpoints,
     KadProviderRecords, KadRecords, KadWorkerProviderRecords, KadWorkerRecords, LastProposed,
-    LastProposedByAuthority, NodeBatchesCache, NodeIdentity, Payload, PendingEpochRecord, Votes,
+    LastProposedByAuthority, NodeBatchesCache, NodeIdentity, Payload, PendingEpochRecord,
+    PrevEpochCertificateDigestByOrigin, PrevEpochCertificates, Votes,
 };
 #[cfg(feature = "cold-storage")]
 use tables::{ColdArchiveHighWaterMark, ColdBatchLocations};
@@ -50,6 +51,8 @@ const VOTES_CF: &str = "votes";
 const CERTIFICATES_CF: &str = "certificates";
 const CERTIFICATE_DIGEST_BY_ROUND_CF: &str = "certificate_digest_by_round";
 const CERTIFICATE_DIGEST_BY_ORIGIN_CF: &str = "certificate_digest_by_origin";
+const PREV_EPOCH_CERTIFICATES_CF: &str = "prev_epoch_certificates";
+const PREV_EPOCH_CERTIFICATE_DIGEST_BY_ORIGIN_CF: &str = "prev_epoch_certificate_digest_by_origin";
 const PAYLOAD_CF: &str = "payload";
 const BATCHES_CF: &str = "batches";
 const CONSENSUS_BLOCK_CF: &str = "consensus_block";
@@ -107,6 +110,11 @@ pub mod tables {
         CertificateDigestByRound;crate::CERTIFICATE_DIGEST_BY_ROUND_CF;<(Round, AuthorityIdentifier), CertificateDigest>, // Cleared every epoch
         CertificateDigestByOrigin;crate::CERTIFICATE_DIGEST_BY_ORIGIN_CF;<(AuthorityIdentifier, Round), CertificateDigest>, // Cleared every epoch
         Payload;crate::PAYLOAD_CF;<(BlockHash, WorkerId), PayloadToken>, // Cleared every epoch
+        // Tail of the previous epoch: the last rounds of its certificate tables, copied here at
+        // the transition before the live tables are cleared so a validator still finishing that
+        // epoch can fetch them. Replaced at every transition; never read by the live DAG.
+        PrevEpochCertificates;crate::PREV_EPOCH_CERTIFICATES_CF;<CertificateDigest, Certificate>,
+        PrevEpochCertificateDigestByOrigin;crate::PREV_EPOCH_CERTIFICATE_DIGEST_BY_ORIGIN_CF;<(AuthorityIdentifier, Round), CertificateDigest>,
         // Table is used for "normal" consensus as well as for the consensus chain.
         Batches;crate::BATCHES_CF;<BlockHash, Batch>, // Long lived
         // These tables are for the consensus chain not the normal consensus.
@@ -274,6 +282,8 @@ fn open_default_tables<DB: Database>(db: &mut DB) -> eyre::Result<()> {
     open_one::<CertificateDigestByRound>(db)?;
     open_one::<CertificateDigestByOrigin>(db)?;
     open_one::<Payload>(db)?;
+    open_one::<PrevEpochCertificates>(db)?;
+    open_one::<PrevEpochCertificateDigestByOrigin>(db)?;
     open_one::<Batches>(db)?;
     open_one::<ConsensusBlocks>(db)?;
     open_one::<ConsensusBlockNumbersByDigest>(db)?;

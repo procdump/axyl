@@ -3,7 +3,10 @@
 use std::{cmp::Ordering, collections::BTreeMap, future::Future, sync::LazyLock};
 
 use crate::{
-    tables::{CertificateDigestByOrigin, CertificateDigestByRound, Certificates},
+    tables::{
+        CertificateDigestByOrigin, CertificateDigestByRound, Certificates,
+        PrevEpochCertificateDigestByOrigin, PrevEpochCertificates,
+    },
     StoreResult,
 };
 use rayls_infrastructure_types::{
@@ -14,6 +17,69 @@ use rayls_infrastructure_utils::NotifyRead;
 
 static NOTIFY_SUBSCRIBERS: LazyLock<NotifyRead<CertificateDigest, Certificate>> =
     LazyLock::new(NotifyRead::new);
+
+/// Which epoch's certificate tables a read targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CertScope {
+    /// The live tables of the current epoch.
+    Current,
+    /// The tail of the previous epoch kept across the transition clear, see
+    /// [`copy_tail_to_prev_epoch`].
+    PrevEpoch,
+}
+
+/// Rounds of the closing epoch kept in the previous-epoch tail tables across the transition
+/// clear. The tail must hold the round after the closing leader, whose certificates are the
+/// leader's commit support and are in no committed sub-dag, plus the lag of a validator still
+/// finishing that epoch. Fifty rounds is a few seconds of DAG and a few hundred certificates.
+pub const PREV_EPOCH_TAIL_ROUNDS: Round = 50;
+
+/// One certificate of the tail kept across the epoch clear: its round, origin, digest and body.
+pub type PrevEpochTailEntry = (Round, AuthorityIdentifier, CertificateDigest, Certificate);
+
+/// Read the last `keep_rounds` rounds of the live certificate tables, highest round first.
+///
+/// Read through the database, not inside the transition's write transaction: the layered
+/// database's write transaction refuses every read. Call it right before the clear transaction
+/// and hand the result to [`write_prev_epoch_tail`]; nothing writes certificates at that point of
+/// the transition, so the two see the same tables.
+pub fn live_tail<DB: Database>(
+    db: &DB,
+    keep_rounds: Round,
+) -> StoreResult<Vec<PrevEpochTailEntry>> {
+    let Some(((highest, _), _)) = db.last_record::<CertificateDigestByRound>() else {
+        return Ok(Vec::new());
+    };
+    // keep rounds in [from, highest]
+    let from = highest.saturating_sub(keep_rounds.saturating_sub(1));
+    let index: Vec<_> = db
+        .reverse_iter::<CertificateDigestByRound>()
+        .take_while(|((round, _), _)| *round >= from)
+        .collect();
+    let mut tail = Vec::with_capacity(index.len());
+    for ((round, origin), digest) in index {
+        if let Some(cert) = db.get::<Certificates>(&digest)? {
+            tail.push((round, origin, digest, cert));
+        }
+    }
+    Ok(tail)
+}
+
+/// Replace the previous-epoch tail tables with `tail` (from [`live_tail`]). Meant to run inside
+/// the transition's write transaction, before the live tables are cleared, so the tail and the
+/// clear commit together and a recovery that re-runs the clear cannot lose it.
+pub fn write_prev_epoch_tail<TX: DbTxMut>(
+    txn: &mut TX,
+    tail: &[PrevEpochTailEntry],
+) -> StoreResult<()> {
+    txn.clear_table::<PrevEpochCertificates>()?;
+    txn.clear_table::<PrevEpochCertificateDigestByOrigin>()?;
+    for (round, origin, digest, cert) in tail {
+        txn.insert::<PrevEpochCertificates>(digest, cert)?;
+        txn.insert::<PrevEpochCertificateDigestByOrigin>(&(origin.clone(), *round), digest)?;
+    }
+    Ok(())
+}
 
 /// Certificate persistence with round-based indexing and pub/sub on writes.
 ///
@@ -49,6 +115,22 @@ pub trait CertificateStore {
         origin: &AuthorityIdentifier,
         round: Round,
     ) -> StoreResult<Option<Certificate>>;
+
+    /// [`CertificateStore::read_by_index`] against the tables selected by `scope`.
+    fn read_by_index_in(
+        &self,
+        scope: CertScope,
+        origin: &AuthorityIdentifier,
+        round: Round,
+    ) -> StoreResult<Option<Certificate>>;
+
+    /// [`CertificateStore::next_round_number`] against the tables selected by `scope`.
+    fn next_round_number_in(
+        &self,
+        scope: CertScope,
+        origin: &AuthorityIdentifier,
+        round: Round,
+    ) -> StoreResult<Option<Round>>;
 
     /// Check database for certificate.
     fn contains(&self, digest: &CertificateDigest) -> StoreResult<bool>;
@@ -184,6 +266,45 @@ impl<DB: Database> CertificateStore for DB {
         match self.get::<CertificateDigestByOrigin>(&(origin.clone(), round))? {
             Some(d) => self.read(d),
             None => Ok(None),
+        }
+    }
+
+    fn read_by_index_in(
+        &self,
+        scope: CertScope,
+        origin: &AuthorityIdentifier,
+        round: Round,
+    ) -> StoreResult<Option<Certificate>> {
+        match scope {
+            CertScope::Current => self.read_by_index(origin, round),
+            CertScope::PrevEpoch => {
+                match self.get::<PrevEpochCertificateDigestByOrigin>(&(origin.clone(), round))? {
+                    Some(d) => self.get::<PrevEpochCertificates>(&d),
+                    None => Ok(None),
+                }
+            }
+        }
+    }
+
+    fn next_round_number_in(
+        &self,
+        scope: CertScope,
+        origin: &AuthorityIdentifier,
+        round: Round,
+    ) -> StoreResult<Option<Round>> {
+        match scope {
+            CertScope::Current => self.next_round_number(origin, round),
+            CertScope::PrevEpoch => self.with_read_txn(|txn| {
+                let key = (origin.clone(), round + 1);
+                if let Some(((name, round), _)) =
+                    txn.skip_to::<PrevEpochCertificateDigestByOrigin>(&key)?.next()
+                {
+                    if &name == origin {
+                        return Ok(Some(round));
+                    }
+                }
+                Ok(None)
+            }),
         }
     }
 
@@ -442,3 +563,62 @@ impl<DB: Database> CertificateStore for DB {
 
 // NOTE: tests for this module are in primary/tests/it/storage_tests.rs to avoid circular
 // dependancies.
+
+/// Previous-epoch tail tests run here, against the layered database, because its write
+/// transaction refuses reads while [`crate::mem_db::MemDatabase`] allows them: a tail step that
+/// reads inside the clear transaction passes on the memory database and panics on a node.
+#[cfg(test)]
+mod prev_epoch_tail_tests {
+    use super::*;
+    use crate::{layered_db::LayeredDatabase, mem_db::MemDatabase, open_default_tables};
+    use rayls_infrastructure_types::Header;
+
+    fn cert(round: Round, author: u8) -> Certificate {
+        let mut cert = Certificate::default();
+        cert.header = Header {
+            round,
+            author: AuthorityIdentifier::dummy_for_test(author),
+            ..Default::default()
+        };
+        cert
+    }
+
+    #[test]
+    fn tail_survives_the_epoch_clear_on_the_layered_database() {
+        let mut db = LayeredDatabase::open(MemDatabase::new());
+        open_default_tables(&mut db).expect("open tables");
+        for round in 1..=4 {
+            for author in 0..4u8 {
+                db.write(cert(round, author)).expect("write certificate");
+            }
+        }
+
+        // what the transition does: read the last two rounds through the database, then write
+        // them as the tail and clear the live tables in one write transaction
+        let tail = live_tail(&db, 2).expect("read tail");
+        assert_eq!(tail.len(), 8, "two rounds of four authorities");
+        db.with_write_txn(|txn| {
+            write_prev_epoch_tail(txn, &tail)?;
+            txn.clear_table::<Certificates>()?;
+            txn.clear_table::<CertificateDigestByRound>()?;
+            txn.clear_table::<CertificateDigestByOrigin>()
+        })
+        .expect("write tail and clear live tables");
+
+        let a0 = AuthorityIdentifier::dummy_for_test(0);
+        assert!(db.read_by_index(&a0, 4).expect("read").is_none(), "live tables are cleared");
+        assert!(
+            db.read_by_index_in(CertScope::PrevEpoch, &a0, 2).expect("read").is_none(),
+            "round 2 is below the kept tail"
+        );
+        let kept = db.read_by_index_in(CertScope::PrevEpoch, &a0, 3).expect("read");
+        assert_eq!(kept.map(|c| c.header.round), Some(3));
+        assert_eq!(db.next_round_number_in(CertScope::PrevEpoch, &a0, 2).expect("next"), Some(3));
+        assert_eq!(db.next_round_number_in(CertScope::PrevEpoch, &a0, 3).expect("next"), Some(4));
+        assert_eq!(db.next_round_number_in(CertScope::PrevEpoch, &a0, 4).expect("next"), None);
+
+        // the next transition replaces the tail
+        db.with_write_txn(|txn| write_prev_epoch_tail(txn, &[])).expect("replace tail");
+        assert!(db.read_by_index_in(CertScope::PrevEpoch, &a0, 3).expect("read").is_none());
+    }
+}

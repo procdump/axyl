@@ -22,6 +22,7 @@ networks:
       OutputSeqNormalization: never
       SenderAffinityLoadBalancing: never
       EpochCloseSeedV2: never
+      CertificateFetchEpochV2: never
   testnet:
     chain_id: 7295799
     hardforks:
@@ -41,3 +42,4 @@ networks:
       OutputSeqNormalization: never
       SenderAffinityLoadBalancing: never
       EpochCloseSeedV2: never
+      CertificateFetchEpochV2: never

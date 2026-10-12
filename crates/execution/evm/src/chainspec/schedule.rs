@@ -62,6 +62,9 @@ impl RaylsHardFork {
             ScheduledFork::new(Self::SenderAffinityLoadBalancing, ForkCondition::Never),
             // Never until SRE schedules an activation block: changes epoch-closing block hashes.
             ScheduledFork::new(Self::EpochCloseSeedV2, ForkCondition::Never),
+            // Never until SRE schedules an activation block: switches a network request format,
+            // and nodes that have not upgraded cannot decode the new one.
+            ScheduledFork::new(Self::CertificateFetchEpochV2, ForkCondition::Never),
         ]
     }
 
@@ -88,6 +91,9 @@ impl RaylsHardFork {
             ScheduledFork::new(Self::SenderAffinityLoadBalancing, ForkCondition::Block(17_300_000)),
             // Never until SRE schedules an activation block: changes epoch-closing block hashes.
             ScheduledFork::new(Self::EpochCloseSeedV2, ForkCondition::Never),
+            // Never until SRE schedules an activation block: switches a network request format,
+            // and nodes that have not upgraded cannot decode the new one.
+            ScheduledFork::new(Self::CertificateFetchEpochV2, ForkCondition::Never),
         ]
     }
 
@@ -115,6 +121,9 @@ impl RaylsHardFork {
             ScheduledFork::new(Self::SenderAffinityLoadBalancing, ForkCondition::Block(12_231_705)),
             // Never until SRE schedules an activation block: changes epoch-closing block hashes.
             ScheduledFork::new(Self::EpochCloseSeedV2, ForkCondition::Never),
+            // Never until SRE schedules an activation block: switches a network request format,
+            // and nodes that have not upgraded cannot decode the new one.
+            ScheduledFork::new(Self::CertificateFetchEpochV2, ForkCondition::Never),
         ]
     }
 
@@ -151,6 +160,7 @@ impl RaylsHardFork {
             // Real networks stay `Never` until an activation block is chosen operationally.
             ScheduledFork::new(Self::SenderAffinityLoadBalancing, ForkCondition::Block(0)),
             ScheduledFork::new(Self::EpochCloseSeedV2, ForkCondition::Block(0)),
+            ScheduledFork::new(Self::CertificateFetchEpochV2, ForkCondition::Block(0)),
         ]
     }
 

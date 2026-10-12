@@ -2,14 +2,17 @@
 
 use crate::{
     error::PrimaryNetworkError,
-    network::{message::PrimaryGossip, MissingCertificatesRequest, RequestHandler},
+    network::{
+        handler::fetch_scope, message::PrimaryGossip, MissingCertificatesRequest, PrimaryRequest,
+        RequestHandler,
+    },
     state_sync::StateSynchronizer,
     ConsensusBus,
 };
 use assert_matches::assert_matches;
 use rayls_consensus_network::{GossipMessage, TopicHash};
 use rayls_infrastructure_config::LibP2pConfig;
-use rayls_infrastructure_storage::mem_db::MemDatabase;
+use rayls_infrastructure_storage::{mem_db::MemDatabase, CertScope};
 use rayls_infrastructure_types::{
     encode, error::HeaderError, now, AuthorityIdentifier, BlockHash, BlockHeader, BlockNumHash,
     BlsPublicKey, Certificate, CertificateDigest, ExecHeader, Hash as _, RaylsReceiver,
@@ -395,4 +398,36 @@ async fn test_primary_batch_gossip_topics() {
     let topic = TopicHash::from_raw(LibP2pConfig::consensus_output_topic());
     let bad_msg = GossipMessage { source: None, data: data.clone(), sequence_number: None, topic };
     assert!(handler.process_gossip(&bad_msg).await.is_err());
+}
+
+#[test]
+fn fetch_scope_serves_current_previous_and_nothing_older() {
+    // our epoch, or an older requester that does not say: the live tables
+    assert_eq!(fetch_scope(Some(485), 485), Some(CertScope::Current));
+    assert_eq!(fetch_scope(None, 485), Some(CertScope::Current));
+    // the epoch we just closed: the kept tail
+    assert_eq!(fetch_scope(Some(484), 485), Some(CertScope::PrevEpoch));
+    // anything older, or ahead of us: nothing to serve
+    assert_eq!(fetch_scope(Some(483), 485), None);
+    assert_eq!(fetch_scope(Some(486), 485), None);
+    // no overflow on a crafted epoch
+    assert_eq!(fetch_scope(Some(u32::MAX), 0), None);
+}
+
+#[test]
+fn missing_certificates_in_epoch_is_the_last_request_variant() {
+    // BCS writes the variant index first. The epoch-stamped request must stay appended after every
+    // older variant so a node that does not know it still decodes all of them; and an encoded
+    // older variant must decode unchanged on a node that does.
+    let old = PrimaryRequest::MissingCertificates { inner: MissingCertificatesRequest::default() };
+    let new = PrimaryRequest::MissingCertificatesInEpoch {
+        inner: MissingCertificatesRequest::default(),
+        epoch: 484,
+    };
+    let old_bytes = encode(&old);
+    let new_bytes = encode(&new);
+    assert_eq!(old_bytes[0], 1, "MissingCertificates keeps its original variant index");
+    assert_eq!(new_bytes[0], 5, "MissingCertificatesInEpoch is appended last");
+    assert_eq!(rayls_infrastructure_types::decode::<PrimaryRequest>(&old_bytes), old);
+    assert_eq!(rayls_infrastructure_types::decode::<PrimaryRequest>(&new_bytes), new);
 }

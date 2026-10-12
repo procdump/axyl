@@ -209,6 +209,15 @@ impl RaylsChainSpecBuilder {
         self
     }
 
+    /// Activate CertificateFetchEpochV2 at `block`.
+    #[must_use = "builder method result must be used"]
+    pub fn certificate_fetch_epoch_v2(mut self, block: u64) -> Self {
+        self.inner
+            .hardforks
+            .insert(RaylsHardFork::CertificateFetchEpochV2, ForkCondition::Block(block));
+        self
+    }
+
     /// Set the minimum EIP-1559 base fee floor.
     #[must_use = "builder method result must be used"]
     pub fn min_base_fee(mut self, min_base_fee: u64) -> Self {

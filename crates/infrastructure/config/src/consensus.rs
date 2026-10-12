@@ -46,6 +46,10 @@ pub struct ConsensusConfig<DB> {
     /// from). Fixed for the life of the epoch, so it is held by value. The certifier uses it to
     /// skip the cert-fetcher grace period on initial startup.
     initial_epoch: bool,
+    /// Activation block of the `CertificateFetchEpochV2` fork, `None` while it is `Never`. Read
+    /// from the chain spec by the orchestrator when the epoch config is built; the certificate
+    /// fetcher compares it with the executed tip to pick the request variant it sends.
+    certificate_fetch_epoch_v2_block: Option<u64>,
 }
 
 impl<DB> ConsensusConfig<DB>
@@ -175,7 +179,14 @@ where
             shutdown,
             epoch_boundary,
             initial_epoch,
+            certificate_fetch_epoch_v2_block: None,
         })
+    }
+
+    /// Install the activation block of the `CertificateFetchEpochV2` fork (`None` for `Never`).
+    pub fn with_certificate_fetch_epoch_v2_block(mut self, block: Option<u64>) -> Self {
+        self.certificate_fetch_epoch_v2_block = block;
+        self
     }
 
     /// Returns a reference to the shutdown notifier.
@@ -227,6 +238,11 @@ where
     /// cert-fetcher grace period on initial startup.
     pub fn is_initial_epoch(&self) -> bool {
         self.initial_epoch
+    }
+
+    /// Activation block of the `CertificateFetchEpochV2` fork, `None` while it is `Never`.
+    pub fn certificate_fetch_epoch_v2_block(&self) -> Option<u64> {
+        self.certificate_fetch_epoch_v2_block
     }
 
     /// Returns a reference to the node's persistent storage database for the current epoch.

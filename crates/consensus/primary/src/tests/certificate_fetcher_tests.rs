@@ -415,3 +415,19 @@ async fn fetch_certificates_basic() {
     )
     .await;
 }
+
+#[test]
+fn epoch_stamp_follows_the_fork_at_the_next_block() {
+    use super::epoch_stamp;
+    // Never: always the original request
+    assert_eq!(epoch_stamp(None, 0, 484), None);
+    assert_eq!(epoch_stamp(None, 1_000_000, 484), None);
+    // block-scheduled: stamped once the next block to execute reaches the activation block
+    assert_eq!(epoch_stamp(Some(100), 98, 484), None);
+    assert_eq!(epoch_stamp(Some(100), 99, 484), Some(484));
+    assert_eq!(epoch_stamp(Some(100), 500, 484), Some(484));
+    // local networks activate at genesis: stamped before any block executed
+    assert_eq!(epoch_stamp(Some(0), 0, 7), Some(7));
+    // no overflow at the top of the range
+    assert_eq!(epoch_stamp(Some(u64::MAX), u64::MAX, 1), Some(1));
+}
