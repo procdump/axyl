@@ -47,19 +47,31 @@ pub fn live_tail<DB: Database>(
     db: &DB,
     keep_rounds: Round,
 ) -> StoreResult<Vec<PrevEpochTailEntry>> {
+    if keep_rounds == 0 {
+        return Ok(Vec::new());
+    }
     let Some(((highest, _), _)) = db.last_record::<CertificateDigestByRound>() else {
         return Ok(Vec::new());
     };
     // keep rounds in [from, highest]
-    let from = highest.saturating_sub(keep_rounds.saturating_sub(1));
+    let from = highest.saturating_sub(keep_rounds - 1);
     let index: Vec<_> = db
         .reverse_iter::<CertificateDigestByRound>()
         .take_while(|((round, _), _)| *round >= from)
         .collect();
     let mut tail = Vec::with_capacity(index.len());
     for ((round, origin), digest) in index {
-        if let Some(cert) = db.get::<Certificates>(&digest)? {
-            tail.push((round, origin, digest, cert));
+        match db.get::<Certificates>(&digest)? {
+            Some(cert) => tail.push((round, origin, digest, cert)),
+            // The round index and the certificate bodies are written together, so this is an
+            // invariant breach. Surface it here, where it costs a peer a certificate it needs.
+            None => tracing::warn!(
+                target: "certificate-store",
+                round,
+                ?origin,
+                ?digest,
+                "round index entry without a certificate body; left out of the previous-epoch tail"
+            ),
         }
     }
     Ok(tail)
