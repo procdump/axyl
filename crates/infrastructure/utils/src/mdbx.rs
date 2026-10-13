@@ -32,15 +32,16 @@ pub fn check_page_size(page_size: usize) -> Result<usize, String> {
     Ok(page_size)
 }
 
-/// Page size for a new or empty datafile; `None` lets an existing one keep its own geometry.
-pub fn new_datafile_page_size(
-    db_dir: &Path,
-    configured: Option<usize>,
-) -> Result<Option<usize>, String> {
+/// Page size to open a datafile at: the configured one (or the default) for a new or empty
+/// datafile, otherwise the existing datafile's own; `None` if that cannot be detected.
+pub fn open_page_size(db_dir: &Path, configured: Option<usize>) -> Result<Option<usize>, String> {
+    let dat = db_dir.join(MDBX_DAT);
     // libmdbx creates the database in an empty datafile, so that one counts as new.
-    let dat_len = std::fs::metadata(db_dir.join(MDBX_DAT)).map(|m| m.len()).unwrap_or(0);
+    let dat_len = std::fs::metadata(&dat).map(|m| m.len()).unwrap_or(0);
     if dat_len > 0 {
-        return Ok(None);
+        // Unset, libmdbx sizes the pre-open geometry in host pages and writes it into the header
+        // of a datafile whose page size differs (a 4 KiB one on a 16 KiB-page ARM host).
+        return Ok(detect_page_size(&dat));
     }
     check_page_size(configured.unwrap_or(DEFAULT_MDBX_PAGE_SIZE)).map(Some)
 }

@@ -501,7 +501,7 @@ impl MdbxConfig {
 
 // Page-size rules and detection shared with the other node database so both stay in sync.
 pub use rayls_infrastructure_utils::mdbx::DEFAULT_MDBX_PAGE_SIZE;
-use rayls_infrastructure_utils::mdbx::{detect_page_size, new_datafile_page_size, MDBX_DAT};
+use rayls_infrastructure_utils::mdbx::{detect_page_size, open_page_size, MDBX_DAT};
 
 /// Runs `open` without a page size and, if meta page 0 is unreadable, again at the detected one.
 ///
@@ -548,11 +548,11 @@ impl MdbxDatabase {
 
     /// Create a new database at the specified path with custom configuration.
     pub fn open_with_config<P: AsRef<Path>>(path: P, config: MdbxConfig) -> eyre::Result<Self> {
-        let page_size = new_datafile_page_size(path.as_ref(), config.page_size)
+        let page_size = open_page_size(path.as_ref(), config.page_size)
             .map_err(|e| eyre::eyre!("invalid consensus DB page size: {e}"))?;
         tracing::info!(
             target: "rayls::mdbx",
-            "Opening MDBX database with config: max_read_txn_duration={:?}, max_readers={}, max_size={}GB, new_datafile_page_size={:?}",
+            "Opening MDBX database with config: max_read_txn_duration={:?}, max_readers={}, max_size={}GB, page_size={:?}",
             config.max_read_transaction_duration,
             config.max_readers,
             config.max_db_size / GIGABYTE,
