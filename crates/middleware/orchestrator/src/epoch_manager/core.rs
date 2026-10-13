@@ -126,6 +126,16 @@ const DIGEST_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// turn a collection into an unbounded series of network requests.
 const MAX_DIGEST_RESOLUTIONS: usize = 8;
 
+/// What one turn of the epoch vote collection loop in `certify_pending_epochs` has to act on.
+enum Next {
+    /// A vote to triage, from the backlog or the live queue.
+    Vote(QueuedVote),
+    /// The periodic fallback is due.
+    Fallback,
+    /// The vote queue closed.
+    Closed,
+}
+
 /// Vote-collection state for one pending (uncertified) epoch record inside the single
 /// "Collect Epoch Signatures" task.
 ///
@@ -1500,6 +1510,10 @@ where
                 );
             }
             let timeout = Duration::from_secs(5);
+            // The fallback below (DB check, own-vote republish, cap then peer fetch) runs on a
+            // fixed schedule. A per-recv timeout would be reset by every arriving vote, so a
+            // steady stream of unhelpful votes could postpone it indefinitely.
+            let mut next_fallback = tokio::time::Instant::now() + timeout;
             let mut timeouts = 0;
             let mut alt_recs: B256Map<VotesAggregator<EpochVote>> = B256Map::default();
             // Unplaceable digests already warned about this attempt (once per digest).
@@ -1510,23 +1524,31 @@ where
             let mut resolutions = 0usize;
             loop {
                 // Break promptly when the consumer phase is signalled, rather than only
-                // noticing after the recv timeout. `biased` so shutdown wins over a vote arriving.
-                let result = if let Some(queued_vote) = queued.pop_front() {
+                // noticing at the fallback deadline. `biased` so shutdown wins over a vote
+                // arriving.
+                let next = if let Some(queued_vote) = queued.pop_front() {
                     // Votes in hand must not outrank the shutdown the transition waits on.
                     if vote_shutdown.noticed() {
                         let _ = queued_vote.1.send(Ok(()));
                         break;
                     }
-                    Ok(Some(queued_vote))
+                    Next::Vote(queued_vote)
                 } else {
                     tokio::select! {
                         biased;
                         _ = &vote_shutdown => break,
-                        res = tokio::time::timeout(timeout, rx.recv()) => res,
+                        _ = tokio::time::sleep_until(next_fallback) => {
+                            next_fallback = tokio::time::Instant::now() + timeout;
+                            Next::Fallback
+                        }
+                        maybe = rx.recv() => match maybe {
+                            Some(vote) => Next::Vote(vote),
+                            None => Next::Closed,
+                        },
                     }
                 };
-                match result {
-                    Ok(Some((vote, vote_tx))) => {
+                match next {
+                    Next::Vote((vote, vote_tx)) => {
                         // A vote for one of the records being collected: count it there.
                         if let Some(&i) = by_digest.get(&vote.epoch_hash) {
                             let state = &mut states[i];
@@ -1736,8 +1758,9 @@ where
                             }
                         }
                     }
-                    Ok(None) => break, // channel issues...
-                    Err(_) => {
+                    Next::Closed => break, // channel issues...
+                    Next::Fallback => {
+                        // Deadline reached, whether or not votes kept arriving.
                         // Failed after a minute: break and try to request the certs instead.
                         // (Shutdown is handled by the select arm above, not polled here.)
                         if timeouts > 12 {
