@@ -7,7 +7,7 @@
 //! peer itself is stale and its rejection carries no information about our
 //! liveness).
 
-use rayls_infrastructure_types::{AuthorityIdentifier, Epoch, Round};
+use rayls_infrastructure_types::{AuthorityIdentifier, Epoch};
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
@@ -18,9 +18,7 @@ use std::{
 pub(crate) enum RejectionOutcome {
     /// Below threshold - keep trying.
     BelowThreshold,
-    /// Threshold reached but grace period still active.
-    GracePeriod,
-    /// Threshold reached and grace expired - transition to CvvInactive.
+    /// Threshold reached - transition to CvvInactive.
     TransitionToInactive,
 }
 
@@ -28,11 +26,11 @@ pub(crate) enum RejectionOutcome {
 struct Inner {
     too_old: BTreeSet<AuthorityIdentifier>,
     epoch_mismatch: BTreeSet<AuthorityIdentifier>,
-    /// Highest committed round seen while skipping a cert-covered too-old rejection, and when it
-    /// last advanced. Lets `skip_cert_covered` tell a transient proposer lag (DAG still
-    /// committing) from a genuine wedge (cert store ahead but committed round stalled).
-    last_committed_round: Round,
-    last_progress_at: Instant,
+    /// When the current run of rejections began: the first rejection recorded since the last
+    /// certified header. `None` while the node is certifying normally. Lets
+    /// `skip_with_rejection_grace` tell a transient lag (the node certifies again within
+    /// seconds, which clears this) from a node that has stopped contributing.
+    rejected_since: Option<Instant>,
 }
 
 /// Peer rejection tracker - counts distinct rejecting peers.
@@ -40,43 +38,46 @@ struct Inner {
 pub(crate) struct VoteFailureTracker {
     inner: Arc<Mutex<Inner>>,
     threshold: usize,
-    grace_deadline: Option<Instant>,
 }
 
 impl VoteFailureTracker {
-    /// Create a tracker. `None` grace skips the grace period.
-    pub(crate) fn new(committee_size: usize, grace_deadline: Option<Instant>) -> Self {
+    /// Create a tracker. Rejections are skipped for `REJECTION_GRACE` after the first one that
+    /// follows a certification (see `skip_with_rejection_grace`), which also covers the start of
+    /// an epoch; there is no separate startup grace.
+    pub(crate) fn new(committee_size: usize) -> Self {
         // n/2: f+1 distinct peers for a 3f+1 committee (e.g. 2 of 4).
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 too_old: BTreeSet::new(),
                 epoch_mismatch: BTreeSet::new(),
-                last_committed_round: Round::default(),
-                last_progress_at: Instant::now(),
+                rejected_since: None,
             })),
             threshold: committee_size / 2,
-            grace_deadline,
         }
     }
 
-    /// For a too-old rejection where we already hold the certs for the peer's `limit_round`, decide
-    /// whether to SKIP it (not count it toward demotion).
+    /// Decide whether to SKIP a rejection (not count it toward demotion).
     ///
-    /// We skip while the DAG is still making progress (the committed round is advancing): the
-    /// rejection then reflects a transient proposer stall — our certs are arriving but not yet
-    /// usable as parents — and demoting would only flap. If the committed round has NOT advanced
-    /// for `wedge_window`, the proposer is genuinely wedged despite holding the certs, so we
-    /// stop skipping and let the rejection accumulate toward a demote (whose rejoin re-primes
-    /// consensus).
-    pub(crate) fn skip_cert_covered(&self, committed_round: Round, wedge_window: Duration) -> bool {
+    /// A rejection is skipped while the node has been rejected for less than `grace`, counted
+    /// from the first rejection after the last certified header; certifying again
+    /// (`clear_counters`) resets it. A transient lag, a lost gossip
+    /// certificate being fetched or a boundary the node is about to cross, lasts seconds and
+    /// ends with a certification, so it never outlasts the grace. A node that has stopped
+    /// contributing, wedged or limping behind the committee, never certifies, so its rejections
+    /// count once the grace is over and it demotes at the usual threshold.
+    ///
+    /// No peer rounds and no local progress are consulted: a node that is rejected for the whole
+    /// grace without certifying is out of consensus whatever its rounds are doing.
+    pub(crate) fn skip_with_rejection_grace(&self, grace: Duration) -> bool {
         let mut guard = self.inner.lock().expect("vote failure tracker mutex poisoned");
-        if committed_round > guard.last_committed_round {
-            guard.last_committed_round = committed_round;
-            guard.last_progress_at = Instant::now();
-            true
-        } else {
-            Instant::now().duration_since(guard.last_progress_at) < wedge_window
-        }
+        let since = *guard.rejected_since.get_or_insert_with(Instant::now);
+        since.elapsed() < grace
+    }
+
+    /// Seconds the node has been rejected without certifying, for logs. Zero when certifying.
+    pub(crate) fn rejected_for_secs(&self) -> u64 {
+        let guard = self.inner.lock().expect("vote failure tracker mutex poisoned");
+        guard.rejected_since.map_or(0, |since| since.elapsed().as_secs())
     }
 
     /// Clear counters after successful certification.
@@ -84,6 +85,7 @@ impl VoteFailureTracker {
         let mut guard = self.inner.lock().expect("vote failure tracker mutex poisoned");
         guard.too_old.clear();
         guard.epoch_mismatch.clear();
+        guard.rejected_since = None;
     }
 
     /// Record a `TooOld` rejection from the given peer.
@@ -115,6 +117,16 @@ impl VoteFailureTracker {
         peer_epoch >= our_epoch
     }
 
+    /// True when we are exactly one epoch behind the peer: we are at the epoch boundary and our
+    /// own epoch manager will transition us as soon as the boundary output commits. A rejection
+    /// in that state is gated on the rejection grace like a too-old one (see
+    /// `skip_with_rejection_grace`).
+    /// Two or more epochs behind means we are genuinely far behind, and the rejection counts
+    /// immediately.
+    pub(crate) fn is_one_epoch_behind(peer_epoch: Epoch, our_epoch: Epoch) -> bool {
+        peer_epoch.checked_sub(our_epoch) == Some(1)
+    }
+
     pub(crate) fn too_old_count(&self) -> usize {
         self.inner.lock().expect("vote failure tracker mutex poisoned").too_old.len()
     }
@@ -130,8 +142,6 @@ impl VoteFailureTracker {
     fn evaluate(&self, count: usize) -> RejectionOutcome {
         if count < self.threshold {
             RejectionOutcome::BelowThreshold
-        } else if self.grace_deadline.is_some_and(|d| Instant::now() < d) {
-            RejectionOutcome::GracePeriod
         } else {
             RejectionOutcome::TransitionToInactive
         }
@@ -148,7 +158,7 @@ mod tests {
 
     #[test]
     fn same_peer_rejecting_repeatedly_does_not_demote() {
-        let tracker = VoteFailureTracker::new(4, None);
+        let tracker = VoteFailureTracker::new(4);
         // threshold = 4/2 = 2
 
         let peer_a = peer(1);
@@ -163,7 +173,7 @@ mod tests {
 
     #[test]
     fn distinct_peers_at_threshold_demote() {
-        let tracker = VoteFailureTracker::new(4, None);
+        let tracker = VoteFailureTracker::new(4);
         let first = tracker.record_epoch_mismatch(peer(1));
         assert!(matches!(first, RejectionOutcome::BelowThreshold));
         let second = tracker.record_epoch_mismatch(peer(2));
@@ -181,8 +191,20 @@ mod tests {
     }
 
     #[test]
+    fn one_epoch_behind_is_exactly_one() {
+        // peer just closed the epoch we are still finishing
+        assert!(VoteFailureTracker::is_one_epoch_behind(771, 770));
+        // same epoch (a wrong-epoch rejection from a peer at our epoch): not behind
+        assert!(!VoteFailureTracker::is_one_epoch_behind(770, 770));
+        // two or more epochs: genuinely behind, counts immediately
+        assert!(!VoteFailureTracker::is_one_epoch_behind(772, 770));
+        // peer behind us: filtered earlier as stale anyway
+        assert!(!VoteFailureTracker::is_one_epoch_behind(769, 770));
+    }
+
+    #[test]
     fn too_old_uses_distinct_peer_tracking() {
-        let tracker = VoteFailureTracker::new(4, None);
+        let tracker = VoteFailureTracker::new(4);
         let first = tracker.record_too_old(peer(1));
         assert!(matches!(first, RejectionOutcome::BelowThreshold));
         let repeat = tracker.record_too_old(peer(1));
@@ -192,17 +214,8 @@ mod tests {
     }
 
     #[test]
-    fn grace_period_delays_demotion() {
-        let deadline = Instant::now() + std::time::Duration::from_secs(30);
-        let tracker = VoteFailureTracker::new(4, Some(deadline));
-        tracker.record_epoch_mismatch(peer(1));
-        let at_threshold = tracker.record_epoch_mismatch(peer(2));
-        assert!(matches!(at_threshold, RejectionOutcome::GracePeriod));
-    }
-
-    #[test]
     fn clear_counters_resets_peer_sets() {
-        let tracker = VoteFailureTracker::new(4, None);
+        let tracker = VoteFailureTracker::new(4);
         tracker.record_epoch_mismatch(peer(1));
         tracker.record_too_old(peer(2));
         tracker.clear_counters();
@@ -211,31 +224,46 @@ mod tests {
     }
 
     #[test]
-    fn skip_cert_covered_skips_while_committed_round_advances() {
-        let tracker = VoteFailureTracker::new(4, None);
-        let window = std::time::Duration::from_secs(30);
-        // committed round advancing => transient proposer lag => skip (don't demote)
-        assert!(tracker.skip_cert_covered(10, window));
-        assert!(tracker.skip_cert_covered(11, window));
-        assert!(tracker.skip_cert_covered(12, window));
+    fn first_rejection_starts_the_grace_and_is_skipped() {
+        let tracker = VoteFailureTracker::new(4);
+        assert_eq!(tracker.rejected_for_secs(), 0);
+        // the first rejection after a certification starts the grace and is always skipped
+        assert!(tracker.skip_with_rejection_grace(std::time::Duration::from_secs(30)));
+        // so is every rejection while the grace is not over
+        assert!(tracker.skip_with_rejection_grace(std::time::Duration::from_secs(30)));
     }
 
     #[test]
-    fn skip_cert_covered_tolerates_brief_stall_within_window() {
-        let tracker = VoteFailureTracker::new(4, None);
-        let window = std::time::Duration::from_secs(30);
-        assert!(tracker.skip_cert_covered(10, window));
-        // committed round stalled, but well within the wedge window => still skip
-        assert!(tracker.skip_cert_covered(10, window));
+    fn rejections_count_once_the_grace_is_over() {
+        let tracker = VoteFailureTracker::new(4);
+        let grace = std::time::Duration::from_millis(5);
+        assert!(tracker.skip_with_rejection_grace(grace));
+        std::thread::sleep(grace * 2);
+        // the grace is over: stop skipping, and keep not skipping
+        assert!(!tracker.skip_with_rejection_grace(grace));
+        assert!(!tracker.skip_with_rejection_grace(grace));
     }
 
     #[test]
-    fn skip_cert_covered_stops_skipping_when_wedged() {
-        let tracker = VoteFailureTracker::new(4, None);
-        // first call establishes progress at round 10
-        assert!(tracker.skip_cert_covered(10, std::time::Duration::ZERO));
-        // committed round has not advanced and the (zero) wedge window has elapsed =>
-        // genuinely wedged despite holding certs => stop skipping so it can demote
-        assert!(!tracker.skip_cert_covered(10, std::time::Duration::ZERO));
+    fn certification_resets_the_grace() {
+        let tracker = VoteFailureTracker::new(4);
+        let grace = std::time::Duration::from_millis(5);
+        assert!(tracker.skip_with_rejection_grace(grace));
+        std::thread::sleep(grace * 2);
+        assert!(!tracker.skip_with_rejection_grace(grace));
+        // a certified header clears the counters and the grace: the next rejection starts over
+        tracker.clear_counters();
+        assert_eq!(tracker.rejected_for_secs(), 0);
+        assert!(tracker.skip_with_rejection_grace(grace));
+    }
+
+    #[test]
+    fn wedged_node_still_demotes_at_threshold() {
+        let tracker = VoteFailureTracker::new(4);
+        // a zero grace never skips: every rejection counts
+        assert!(!tracker.skip_with_rejection_grace(std::time::Duration::ZERO));
+        // the caller now records instead of skipping: threshold still works as before
+        assert!(matches!(tracker.record_too_old(peer(1)), RejectionOutcome::BelowThreshold));
+        assert!(matches!(tracker.record_too_old(peer(2)), RejectionOutcome::TransitionToInactive));
     }
 }
