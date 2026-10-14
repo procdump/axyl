@@ -17,10 +17,7 @@ use rayls_infrastructure_types::{
     AuthorityIdentifier, BlsPublicKey, Certificate, CertificateDigest, Committee, Database, Header,
     HeaderDigest, Noticer, Notifier, RaylsReceiver, RaylsSender, TaskManager, TaskSpawner, Vote,
 };
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 use tracing::{debug, enabled, error, info, warn};
 
 #[cfg(test)]
@@ -106,13 +103,6 @@ impl<DB: Database> Certifier<DB> {
                     }
                 }
 
-                // skip grace on initial startup (no prior state to sync from);
-                // allow 30s otherwise for cert fetcher to catch up.
-                let grace_deadline = if config.is_initial_epoch() {
-                    None
-                } else {
-                    Some(Instant::now() + Duration::from_secs(30))
-                };
                 let committee_size = config.committee().size();
                 Self {
                     authority_id: authority_id.clone(),
@@ -126,7 +116,7 @@ impl<DB: Database> Certifier<DB> {
                     metrics: primary_metrics,
                     task_spawner,
                     new_proposal: Notifier::new(),
-                    vote_failures: VoteFailureTracker::new(committee_size, grace_deadline),
+                    vote_failures: VoteFailureTracker::new(committee_size),
                 }
                 .run()
                 .await;
@@ -145,8 +135,8 @@ impl<DB: Database> Certifier<DB> {
     /// ends with a certification, which resets the grace. A node that has stopped contributing,
     /// wedged or limping behind the committee, never certifies, so it demotes at the usual
     /// threshold once the grace is over. Far above the longest legitimate stretch without
-    /// certifying while rejected (a fetch failing over two peers, 10 to 15 s) and equal to the
-    /// startup grace period.
+    /// certifying while rejected (a fetch failing over two peers, 10 to 15 s). It also covers the
+    /// start of an epoch, so there is no separate startup grace.
     ///
     /// Applies to too-old rejections and to wrong-epoch rejections from a peer one epoch ahead
     /// (we are at the boundary, about to transition on our own); see `handle_vote_error`.
@@ -428,10 +418,8 @@ impl<DB: Database> Certifier<DB> {
                 );
                 match outcome {
                     RejectionOutcome::BelowThreshold => VoteErrorAction::Continue,
-                    RejectionOutcome::GracePeriod | RejectionOutcome::TransitionToInactive => {
-                        if matches!(outcome, RejectionOutcome::TransitionToInactive) {
-                            self.request_cvv_inactive();
-                        }
+                    RejectionOutcome::TransitionToInactive => {
+                        self.request_cvv_inactive();
                         VoteErrorAction::Abort(DagError::TooOldRejectedByPeers {
                             peer_id: peer_id.clone(),
                             header_round: *header_round,

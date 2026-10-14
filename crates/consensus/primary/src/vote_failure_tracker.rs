@@ -18,9 +18,7 @@ use std::{
 pub(crate) enum RejectionOutcome {
     /// Below threshold - keep trying.
     BelowThreshold,
-    /// Threshold reached but grace period still active.
-    GracePeriod,
-    /// Threshold reached and grace expired - transition to CvvInactive.
+    /// Threshold reached - transition to CvvInactive.
     TransitionToInactive,
 }
 
@@ -40,12 +38,13 @@ struct Inner {
 pub(crate) struct VoteFailureTracker {
     inner: Arc<Mutex<Inner>>,
     threshold: usize,
-    grace_deadline: Option<Instant>,
 }
 
 impl VoteFailureTracker {
-    /// Create a tracker. `None` grace skips the grace period.
-    pub(crate) fn new(committee_size: usize, grace_deadline: Option<Instant>) -> Self {
+    /// Create a tracker. Rejections are skipped for `REJECTION_GRACE` after the first one that
+    /// follows a certification (see `skip_with_rejection_grace`), which also covers the start of
+    /// an epoch; there is no separate startup grace.
+    pub(crate) fn new(committee_size: usize) -> Self {
         // n/2: f+1 distinct peers for a 3f+1 committee (e.g. 2 of 4).
         Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -54,7 +53,6 @@ impl VoteFailureTracker {
                 rejected_since: None,
             })),
             threshold: committee_size / 2,
-            grace_deadline,
         }
     }
 
@@ -144,8 +142,6 @@ impl VoteFailureTracker {
     fn evaluate(&self, count: usize) -> RejectionOutcome {
         if count < self.threshold {
             RejectionOutcome::BelowThreshold
-        } else if self.grace_deadline.is_some_and(|d| Instant::now() < d) {
-            RejectionOutcome::GracePeriod
         } else {
             RejectionOutcome::TransitionToInactive
         }
@@ -162,7 +158,7 @@ mod tests {
 
     #[test]
     fn same_peer_rejecting_repeatedly_does_not_demote() {
-        let tracker = VoteFailureTracker::new(4, None);
+        let tracker = VoteFailureTracker::new(4);
         // threshold = 4/2 = 2
 
         let peer_a = peer(1);
@@ -177,7 +173,7 @@ mod tests {
 
     #[test]
     fn distinct_peers_at_threshold_demote() {
-        let tracker = VoteFailureTracker::new(4, None);
+        let tracker = VoteFailureTracker::new(4);
         let first = tracker.record_epoch_mismatch(peer(1));
         assert!(matches!(first, RejectionOutcome::BelowThreshold));
         let second = tracker.record_epoch_mismatch(peer(2));
@@ -208,7 +204,7 @@ mod tests {
 
     #[test]
     fn too_old_uses_distinct_peer_tracking() {
-        let tracker = VoteFailureTracker::new(4, None);
+        let tracker = VoteFailureTracker::new(4);
         let first = tracker.record_too_old(peer(1));
         assert!(matches!(first, RejectionOutcome::BelowThreshold));
         let repeat = tracker.record_too_old(peer(1));
@@ -218,17 +214,8 @@ mod tests {
     }
 
     #[test]
-    fn grace_period_delays_demotion() {
-        let deadline = Instant::now() + std::time::Duration::from_secs(30);
-        let tracker = VoteFailureTracker::new(4, Some(deadline));
-        tracker.record_epoch_mismatch(peer(1));
-        let at_threshold = tracker.record_epoch_mismatch(peer(2));
-        assert!(matches!(at_threshold, RejectionOutcome::GracePeriod));
-    }
-
-    #[test]
     fn clear_counters_resets_peer_sets() {
-        let tracker = VoteFailureTracker::new(4, None);
+        let tracker = VoteFailureTracker::new(4);
         tracker.record_epoch_mismatch(peer(1));
         tracker.record_too_old(peer(2));
         tracker.clear_counters();
@@ -238,7 +225,7 @@ mod tests {
 
     #[test]
     fn first_rejection_starts_the_grace_and_is_skipped() {
-        let tracker = VoteFailureTracker::new(4, None);
+        let tracker = VoteFailureTracker::new(4);
         assert_eq!(tracker.rejected_for_secs(), 0);
         // the first rejection after a certification starts the grace and is always skipped
         assert!(tracker.skip_with_rejection_grace(std::time::Duration::from_secs(30)));
@@ -248,7 +235,7 @@ mod tests {
 
     #[test]
     fn rejections_count_once_the_grace_is_over() {
-        let tracker = VoteFailureTracker::new(4, None);
+        let tracker = VoteFailureTracker::new(4);
         let grace = std::time::Duration::from_millis(5);
         assert!(tracker.skip_with_rejection_grace(grace));
         std::thread::sleep(grace * 2);
@@ -259,7 +246,7 @@ mod tests {
 
     #[test]
     fn certification_resets_the_grace() {
-        let tracker = VoteFailureTracker::new(4, None);
+        let tracker = VoteFailureTracker::new(4);
         let grace = std::time::Duration::from_millis(5);
         assert!(tracker.skip_with_rejection_grace(grace));
         std::thread::sleep(grace * 2);
@@ -272,7 +259,7 @@ mod tests {
 
     #[test]
     fn wedged_node_still_demotes_at_threshold() {
-        let tracker = VoteFailureTracker::new(4, None);
+        let tracker = VoteFailureTracker::new(4);
         // a zero grace never skips: every rejection counts
         assert!(!tracker.skip_with_rejection_grace(std::time::Duration::ZERO));
         // the caller now records instead of skipping: threshold still works as before
