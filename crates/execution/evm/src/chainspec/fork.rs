@@ -50,6 +50,10 @@ hardfork!(
         /// with the 2f+1 signer subset, so two honest nodes holding different certificates for
         /// the same leader header produced different block hashes for identical state (#233).
         EpochCloseSeedV2,
+        /// Send certificate fetch requests with the epoch they refer to, so a peer that has
+        /// already closed that epoch serves them from the tail it kept instead of answering from
+        /// the new epoch. Gates only the request format a node sends; every node accepts both.
+        CertificateFetchEpochV2,
     }
 );
 
@@ -73,6 +77,7 @@ impl RaylsHardFork {
             Self::OutputSeqNormalization => 0x0e,
             Self::SenderAffinityLoadBalancing => 0x0f,
             Self::EpochCloseSeedV2 => 0x10,
+            Self::CertificateFetchEpochV2 => 0x11,
         }
     }
 

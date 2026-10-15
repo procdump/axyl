@@ -172,8 +172,14 @@ impl PrimaryNetworkHandle {
         &self,
         peer: BlsPublicKey,
         request: MissingCertificatesRequest,
+        epoch: Option<Epoch>,
     ) -> NetworkResult<Vec<Certificate>> {
-        let request = PrimaryRequest::MissingCertificates { inner: request };
+        // the epoch-stamped variant is sent only once the CertificateFetchEpochV2 fork is
+        // active (the caller decides); older peers cannot decode it
+        let request = match epoch {
+            Some(epoch) => PrimaryRequest::MissingCertificatesInEpoch { inner: request, epoch },
+            None => PrimaryRequest::MissingCertificates { inner: request },
+        };
         let res = self.handle.send_request(request, peer).await?;
         let res = res.await??;
         match res {
@@ -373,8 +379,10 @@ where
                     );
                 }
                 PrimaryRequest::MissingCertificates { inner } => {
-                    self.process_request_for_missing_certs(peer, inner, channel, cancel)
+                    self.process_request_for_missing_certs(peer, inner, None, channel, cancel)
                 }
+                PrimaryRequest::MissingCertificatesInEpoch { inner, epoch } => self
+                    .process_request_for_missing_certs(peer, inner, Some(epoch), channel, cancel),
                 PrimaryRequest::ConsensusHeader { number, hash } => {
                     self.process_consensus_output_request(peer, number, hash, channel, cancel)
                 }
@@ -431,6 +439,7 @@ where
         &self,
         peer: BlsPublicKey,
         request: MissingCertificatesRequest,
+        requested_epoch: Option<Epoch>,
         channel: ResponseChannel<PrimaryResponse>,
         cancel: oneshot::Receiver<()>,
     ) {
@@ -440,7 +449,7 @@ where
         let task_name = format!("MissingCertsReq-{peer}");
         self.task_spawner.spawn_task(task_name, async move {
             tokio::select! {
-                result = request_handler.retrieve_missing_certs(request) => {
+                result = request_handler.retrieve_missing_certs(request, requested_epoch) => {
                     // report penalty if any
                     if let Err(ref e) = result {
                         if let Some(penalty) = e.into() {

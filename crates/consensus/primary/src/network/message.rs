@@ -136,6 +136,19 @@ pub enum PrimaryRequest {
         /// Block hash requesting if not None.
         hash: Option<BlockHash>,
     },
+    /// [`PrimaryRequest::MissingCertificates`] with the epoch the rounds refer to. A peer that
+    /// has already closed that epoch serves it from the tail it kept, so a validator still
+    /// finishing the epoch can fetch what the transition clear removed.
+    ///
+    /// Appended after every older variant so the BCS variant indexes of the others are
+    /// unchanged: a node that does not know this variant still decodes all of them. Sent only
+    /// once the `CertificateFetchEpochV2` fork is active; accepted regardless.
+    MissingCertificatesInEpoch {
+        /// The request.
+        inner: MissingCertificatesRequest,
+        /// The epoch the request's rounds belong to.
+        epoch: Epoch,
+    },
 }
 
 // unit test for this struct in primary::src::tests::network_tests::test_missing_certs_request

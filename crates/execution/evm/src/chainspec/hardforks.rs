@@ -176,6 +176,22 @@ pub trait RaylsHardforks {
         self.is_rayls_fork_active_at_block(RaylsHardFork::EpochCloseSeedV2, block)
     }
 
+    /// Return the block `fork` activates at, or `None` when it is not block-scheduled (`Never`).
+    fn rayls_fork_activation_block(&self, fork: RaylsHardFork) -> Option<u64> {
+        match self.rayls_fork_activation(fork) {
+            ForkCondition::Block(block) => Some(block),
+            _ => None,
+        }
+    }
+
+    /// Return true if the CertificateFetchEpochV2 fork is active at `block`.
+    ///
+    /// Gates the certificate fetch request a node sends: the epoch-stamped variant once active,
+    /// the original one before. Receiving is not gated; every node accepts both.
+    fn is_certificate_fetch_epoch_v2_active_at_block(&self, block: u64) -> bool {
+        self.is_rayls_fork_active_at_block(RaylsHardFork::CertificateFetchEpochV2, block)
+    }
+
     /// Return the max version byte among the forks active at `block`, if any.
     fn version_byte_at_block(&self, block: u64) -> Option<u8> {
         RaylsHardFork::VARIANTS

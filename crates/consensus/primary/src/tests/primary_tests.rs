@@ -727,7 +727,7 @@ async fn test_fetch_certificates_handler() {
             )
             .expect("boundary set")
             .set_max_response_size(response_size);
-        let resp = handler.retrieve_missing_certs(missing_req).await.unwrap();
+        let resp = handler.retrieve_missing_certs(missing_req, None).await.unwrap();
         if let PrimaryResponse::RequestedCertificates(certs) = resp {
             assert_eq!(certs.iter().map(|cert| cert.round()).collect::<Vec<_>>(), *expected_rounds);
         } else {
@@ -748,7 +748,7 @@ async fn test_fetch_certificates_handler() {
             )
             .expect("boundary set")
             .set_max_response_size(0);
-        let resp = handler.retrieve_missing_certs(too_big).await;
+        let resp = handler.retrieve_missing_certs(too_big, None).await;
         assert!(resp.is_err());
     }
 }
@@ -862,4 +862,35 @@ async fn test_request_vote_created_at_in_future() {
         panic!("not a vote!");
     };
     assert!(created_at <= now());
+}
+
+/// A crafted request with the lower bound at the top of the round range and an authority with
+/// an empty skip bitmap passes `get_bounds` (the overflow guard there covers the skip deltas only)
+/// and reaches the store's next-round walk. That walk must not overflow: release builds have
+/// overflow checks on and abort on panic, so this would take the serving node down.
+#[tokio::test]
+async fn test_fetch_certificates_handler_survives_max_lower_bound() {
+    let fixture = CommitteeFixture::builder(MemDatabase::default)
+        .randomize_ports(true)
+        .committee_size(NonZeroUsize::new(4).unwrap())
+        .build();
+    let primary = fixture.authorities().next().unwrap();
+    let cb = ConsensusBus::new();
+    let task_manager = TaskManager::default();
+    let synchronizer =
+        StateSynchronizer::new(primary.consensus_config(), cb.clone(), task_manager.get_spawner());
+    synchronizer.spawn(&task_manager);
+    let handler = RequestHandler::new(primary.consensus_config(), cb.clone(), synchronizer.clone());
+
+    let mut empty_bitmap = Vec::new();
+    roaring::RoaringBitmap::new().serialize_into(&mut empty_bitmap).expect("bitmap");
+    let crafted = MissingCertificatesRequest {
+        exclusive_lower_bound: u32::MAX,
+        skip_rounds: vec![(primary.id(), empty_bitmap)],
+        max_response_size: usize::MAX,
+        exclusive_upper_bound: None,
+    };
+
+    let resp = handler.retrieve_missing_certs(crafted, None).await.expect("served, not aborted");
+    assert!(matches!(resp, PrimaryResponse::RequestedCertificates(certs) if certs.is_empty()));
 }

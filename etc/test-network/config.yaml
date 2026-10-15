@@ -34,6 +34,7 @@ networks:
       OutputSeqNormalization: never
       SenderAffinityLoadBalancing: never
       EpochCloseSeedV2: never
+      CertificateFetchEpochV2: never
   local:
     chain_id: 487
     hardforks:
@@ -53,3 +54,4 @@ networks:
       OutputSeqNormalization: 0
       SenderAffinityLoadBalancing: 0
       EpochCloseSeedV2: 0
+      CertificateFetchEpochV2: 0

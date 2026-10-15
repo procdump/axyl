@@ -4,14 +4,16 @@ use rayls_consensus_primary::{NodeMode, RecentlyExecutedBlocks};
 use rayls_execution_evm::system_calls::ConsensusRegistry;
 use rayls_infrastructure_config::{Config, ConfigFmt, ConfigTrait as _, RaylsDirs};
 use rayls_infrastructure_storage::{
+    live_tail,
     tables::{
         BatchSeqCounter, CertificateDigestByOrigin, CertificateDigestByRound, Certificates,
         ConsensusBlocks, EpochTransitionCheckpoints, KadProviderRecords, KadRecords,
         KadWorkerProviderRecords, KadWorkerRecords, LastProposed, LastProposedByAuthority,
-        NodeBatchesCache, NodeIdentity, Payload, PendingEpochRecord, Votes,
+        NodeBatchesCache, NodeIdentity, Payload, PendingEpochRecord,
+        PrevEpochCertificateDigestByOrigin, PrevEpochCertificates, Votes,
     },
-    CertificateStore as _, EpochStore as _, ProposerStore as _, LAST_PROPOSAL_KEY,
-    PENDING_RECORD_LOG_TARGET,
+    write_prev_epoch_tail, CertificateStore as _, EpochStore as _, ProposerStore as _,
+    LAST_PROPOSAL_KEY, PENDING_RECORD_LOG_TARGET, PREV_EPOCH_TAIL_ROUNDS,
 };
 use rayls_infrastructure_types::{
     AuthorityIdentifier, BlsPublicKey, Committee, CommitteeBuilder, ConsensusHeader,
@@ -337,6 +339,10 @@ where
             // The previous owner's closed-but-uncertified records: this node is not a signer for
             // them and must not spend a collection task trying to certify them.
             txn.clear_table::<PendingEpochRecord>()?;
+            // The previous owner's epoch tail: it would be served under this node's epoch numbering
+            // to a peer still finishing the epoch we just closed, and it is not that epoch.
+            txn.clear_table::<PrevEpochCertificates>()?;
+            txn.clear_table::<PrevEpochCertificateDigestByOrigin>()?;
             info!(
                 target: PENDING_RECORD_LOG_TARGET,
                 "pending epoch records cleared: a foreign consensus-db was adopted"
@@ -627,7 +633,16 @@ where
         let highest_round = self.consensus_db.highest_round_number();
         info!(target: "epoch-manager::cert-store", highest_round, "clearing consensus tables at epoch boundary");
 
+        // Keep the tail of the closing epoch for peers still finishing it: the clear below is the
+        // only place its last rounds (the closing leader's support among them) are dropped, and
+        // no committed sub-dag holds them. Read here (the write transaction cannot read), written
+        // in the same transaction as the clear so a recovery that re-runs this cannot find the
+        // live tables empty and lose the tail.
+        let tail = live_tail(&self.consensus_db, PREV_EPOCH_TAIL_ROUNDS)?;
+        info!(target: "epoch-manager::cert-store", kept = tail.len(), "keeping previous-epoch certificate tail");
+
         self.consensus_db.with_write_txn(|txn| {
+            write_prev_epoch_tail(txn, &tail)?;
             txn.clear_table::<LastProposed>()?;
             txn.clear_table::<LastProposedByAuthority>()?;
             txn.clear_table::<Votes>()?;

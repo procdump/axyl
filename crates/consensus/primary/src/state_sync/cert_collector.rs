@@ -7,7 +7,7 @@ use crate::{
     network::{MissingCertificatesRequest, PrimaryResponse},
 };
 use rayls_infrastructure_config::ConsensusConfig;
-use rayls_infrastructure_storage::CertificateStore;
+use rayls_infrastructure_storage::{CertScope, CertificateStore};
 use rayls_infrastructure_types::{encode, AuthorityIdentifier, Certificate, Database, Round};
 use std::{
     cmp::Reverse,
@@ -55,6 +55,8 @@ pub(crate) struct CertificateCollector<DB> {
     skip_rounds: BTreeMap<AuthorityIdentifier, BTreeSet<Round>>,
     /// Configuration for syncing behavior and access to the database.
     config: ConsensusConfig<DB>,
+    /// Which epoch's tables the certificates are read from.
+    scope: CertScope,
     /// The start time for processing the missing certificates request.
     start_time: Instant,
     /// The maximum uncompressed message size in bytes (with safety margin).
@@ -81,6 +83,7 @@ where
     pub(crate) fn new(
         request: MissingCertificatesRequest,
         config: ConsensusConfig<DB>,
+        scope: CertScope,
     ) -> PrimaryNetworkResult<Self> {
         let start_time = Instant::now();
 
@@ -118,6 +121,7 @@ where
 
             if let Some(next_round) = Self::find_next_round(
                 config.node_storage(),
+                scope,
                 origin,
                 lower_bound,
                 rounds,
@@ -142,6 +146,7 @@ where
             fetch_queue,
             skip_rounds,
             config,
+            scope,
             start_time,
             max_message_size,
             accumulated_size: 0,
@@ -162,6 +167,7 @@ where
     /// respecting the optional exclusive upper bound.
     fn find_next_round(
         store: &DB,
+        scope: CertScope,
         origin: &AuthorityIdentifier,
         current_round: Round,
         skip_rounds: &BTreeSet<Round>,
@@ -170,7 +176,7 @@ where
         let mut current_round = current_round;
         let upper_bound = exclusive_upper_bound.unwrap_or(Round::MAX);
 
-        while let Some(round) = store.next_round_number(origin, current_round)? {
+        while let Some(round) = store.next_round_number_in(scope, origin, current_round)? {
             if round >= upper_bound {
                 return Ok(None);
             }
@@ -186,11 +192,12 @@ where
     /// Try to fetch the next available certificate.
     pub(crate) fn next_certificate(&mut self) -> PrimaryNetworkResult<Option<Certificate>> {
         while let Some(Reverse((round, origin))) = self.fetch_queue.pop() {
-            match self.config.node_storage().read_by_index(&origin, round)? {
+            match self.config.node_storage().read_by_index_in(self.scope, &origin, round)? {
                 Some(cert) => {
                     // Queue up the next round for this authority if available
                     if let Some(next_round) = Self::find_next_round(
                         self.config.node_storage(),
+                        self.scope,
                         &origin,
                         round,
                         self.skip_rounds.get(&origin).ok_or(PrimaryNetworkError::Internal(

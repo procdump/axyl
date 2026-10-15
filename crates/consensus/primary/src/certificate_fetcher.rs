@@ -89,6 +89,9 @@ pub(crate) struct CertificateFetcher<DB> {
     certificate_store: DB,
     /// Used to get Receiver for signal of round changes.
     consensus_bus: ConsensusBus,
+    /// Activation block of the CertificateFetchEpochV2 fork, `None` while `Never`. Decides
+    /// which request variant is sent; see `epoch_stamp`.
+    fetch_epoch_v2_block: Option<u64>,
     /// Receiver for shutdown.
     rx_shutdown: Noticer,
     /// Map of validator to target rounds that local store must catch up to.
@@ -140,6 +143,7 @@ impl<DB: Database> CertificateFetcher<DB> {
             metrics: consensus_bus.primary_metrics().node_metrics.clone(),
         });
         let max_rpc_message_size = config.network_config().libp2p_config().max_rpc_message_size;
+        let fetch_epoch_v2_block = config.certificate_fetch_epoch_v2_block();
 
         task_manager.spawn_critical_task(
             "certificate fetcher task",
@@ -150,6 +154,7 @@ impl<DB: Database> CertificateFetcher<DB> {
                         committee,
                         certificate_store,
                         consensus_bus,
+                        fetch_epoch_v2_block,
                         rx_shutdown,
                         targets: BTreeMap::new(),
                         fetch_certificates_task: JoinSet::new(),
@@ -462,6 +467,10 @@ impl<DB: Database> CertificateFetcher<DB> {
         // in catch-up mode, query all peers and merge responses to get the
         // most complete cert set (different peers may hold different subsets)
         let merge_all_peers = !is_active;
+        let executed_tip =
+            self.consensus_bus.recently_executed_blocks().borrow().latest_block_num_hash().number;
+        let fetch_epoch =
+            epoch_stamp(self.fetch_epoch_v2_block, executed_tip, self.committee.epoch());
 
         self.fetch_certificates_task.spawn(monitored_future!(
             Self::run_fetch_and_report(
@@ -470,7 +479,8 @@ impl<DB: Database> CertificateFetcher<DB> {
                 gc_round,
                 written_rounds,
                 max_response_size,
-                merge_all_peers
+                merge_all_peers,
+                fetch_epoch
             ),
             "CertificatesFetching"
         ));
@@ -484,6 +494,7 @@ impl<DB: Database> CertificateFetcher<DB> {
         written_rounds: BTreeMap<AuthorityIdentifier, BTreeSet<Round>>,
         max_response_size: usize,
         merge_all_peers: bool,
+        fetch_epoch: Option<Epoch>,
     ) -> FetchOutcome {
         let _scope = monitored_scope("CertificatesFetching");
         state.metrics.certificate_fetcher_inflight_fetch.inc();
@@ -496,6 +507,7 @@ impl<DB: Database> CertificateFetcher<DB> {
             written_rounds,
             max_response_size,
             merge_all_peers,
+            fetch_epoch,
         )
         .await
         {
@@ -575,6 +587,7 @@ async fn run_fetch_task<DB: Database>(
     written_rounds: BTreeMap<AuthorityIdentifier, BTreeSet<Round>>,
     max_response_size: usize,
     merge_all_peers: bool,
+    fetch_epoch: Option<Epoch>,
 ) -> CertManagerResult<()> {
     // tighten lower bound past contiguous prefix to reduce server scan work;
     // prune written_rounds below the new floor to avoid delta underflow.
@@ -598,6 +611,7 @@ async fn run_fetch_task<DB: Database>(
         &committee,
         request,
         merge_all_peers,
+        fetch_epoch,
     )
     .await
     else {
@@ -700,6 +714,7 @@ async fn fetch_certificates_helper(
     committee: &Committee,
     request: MissingCertificatesRequest,
     merge_all_peers: bool,
+    fetch_epoch: Option<Epoch>,
 ) -> Option<FetchCertificatesResponse> {
     let _scope = monitored_scope("FetchingCertificatesFromPeers");
     trace!(target: "primary::cert_fetcher", "Start sending fetch certificates requests");
@@ -728,7 +743,7 @@ async fn fetch_certificates_helper(
                 let peer = *peer;
                 multi_fut.push(async move {
                     debug!(target: "primary::cert_fetcher", "sending fetch request to {peer}");
-                    let result = network_clone.fetch_certificates(peer, request_clone).await;
+                    let result = network_clone.fetch_certificates(peer, request_clone, fetch_epoch).await;
                     match &result {
                         Ok(certs) => info!(target: "primary::cert_fetcher", "peer {peer} returned {} certificates", certs.len()),
                         Err(e) => warn!(target: "primary::cert_fetcher", "peer {peer} fetch error: {e}"),
@@ -774,7 +789,7 @@ async fn fetch_certificates_helper(
                 let network_clone = network.clone();
                 fut.push(monitored_future!(async move {
                     debug!(target: "primary::cert_fetcher", "sending fetch request to {peer}");
-                    let result = network_clone.fetch_certificates(peer, request_clone).await;
+                    let result = network_clone.fetch_certificates(peer, request_clone, fetch_epoch).await;
                     match &result {
                         Ok(certificates) => {
                             info!(target: "primary::cert_fetcher", "peer {peer} returned {} certificates", certificates.len());
@@ -856,4 +871,15 @@ async fn process_certificates_helper<DB: Database>(
     trace!(target: "primary::cert_fetcher", "Fetched certificates have been processed");
 
     Ok(())
+}
+
+/// The epoch to stamp on a certificate fetch request, or `None` to send the original request.
+///
+/// The stamped variant (`PrimaryRequest::MissingCertificatesInEpoch`) is sent only once the
+/// CertificateFetchEpochV2 fork is active at the next block to execute, the same point every
+/// other fork check uses; peers that have not upgraded cannot decode it. `activation` is the
+/// fork's block, `None` while it is `Never`.
+fn epoch_stamp(activation: Option<u64>, executed_tip: u64, epoch: Epoch) -> Option<Epoch> {
+    let next_block = executed_tip.saturating_add(1);
+    activation.filter(|&block| next_block >= block).map(|_| epoch)
 }
