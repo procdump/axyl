@@ -9,16 +9,22 @@ if [[ ! -e "$envPath" ]]; then
     echo "Error: .env file not found at $envPath"
     exit 1
 fi
+set -a
 . "$envPath"
+set +a
 
 cd "$workingDir/../.."
 
-RL_BLS_PASSPHRASE="local"
+BUILD_CONFIG="${BUILD_CONFIG:-debug}"
+
+# BLS keystore passphrase from .env - must match the one used by create-validator.sh
+RL_BLS_PASSPHRASE="${RL_BLS_PASSPHRASE:-local}"
+export RL_BLS_PASSPHRASE
 
 # PRIVATE KEY
 if [ -z "$PRIVATE_KEY" ]; then
     echo "Enter private key:"
-    read PRIVATE_KEY
+    read -r PRIVATE_KEY
     if [ -z "$PRIVATE_KEY" ]; then
         echo "Error: Private key is required."
         exit 1
@@ -28,7 +34,7 @@ fi
 # RPC_URL
 if [ -z "$RPC_URL" ]; then
     echo "Enter RPC URL:"
-    read RPC_URL
+    read -r RPC_URL
     if [ -z "$RPC_URL" ]; then
         echo "Error: RPC URL is required."
         exit 1
@@ -36,9 +42,7 @@ if [ -z "$RPC_URL" ]; then
 fi
 
 # registry contract address - if not supplied, use default value
-if [ -z "$REGISTRY_CONTRACT_ADDRESS" ]; then
-    REGISTRY_CONTRACT_ADDRESS="0x07E17e17E17e17E17e17E17E17E17e17e17E17e1"
-fi
+REGISTRY_CONTRACT_ADDRESS="${REGISTRY_CONTRACT_ADDRESS:-0x07E17e17E17e17E17e17E17E17E17e17e17E17e1}"
 
 while [ "$1" != "" ]; do
     case $1 in
@@ -55,6 +59,8 @@ done
 DATADIR="$workingDir/local-validator"
 
 BUILD_ARGS=(
+    "-p"
+    "rayls-network"
     "--bin"
     "rayls-network"
 )
@@ -64,23 +70,21 @@ fi
 if [[ "$BUILD_CONFIG" = "release" ]]; then
     BUILD_ARGS+=( "--release" )
 fi
-RUSTFLAGS="-C target-cpu=native" cargo build "${BUILD_ARGS[@]}"
+cargo build "${BUILD_ARGS[@]}"
 # Example of using redb for the consensus DB
 #cargo build --bin rayls-network --features redb --release
 
 # send activate transaction
 
-echo "Activate transaction sent, sending activate transaction"
+echo "Sending activate transaction..."
 
 cast send "$REGISTRY_CONTRACT_ADDRESS" "activate()" --private-key "$PRIVATE_KEY" --rpc-url "$RPC_URL" -vvvv
 
-
 if [ "$START" = true ]; then
-    export RAYLS_NETWORK="$RAYLS_NETWORK"
-    echo "Starting ${VALIDATOR}, rpc endpoint http://localhost:$RPC_PORT"
+    echo "Starting validator using instance 99"
     # -vvv for INFO, -vvvvv for TRACE, etc
     # start validator
-    RL_BLS_PASSPHRASE="local" ${workingDir}/../../target/${BUILD_CONFIG}/rayls-network node \
+    ${workingDir}/../../target/${BUILD_CONFIG}/rayls-network node \
         --datadir "${DATADIR}" \
         --instance 99 \
         --metrics "127.0.0.1:9109" \
