@@ -342,7 +342,9 @@ where
 
     /// The committee of the previous epoch, if the epoch store had it when this config was built.
     ///
-    /// `None` for epoch 0, and for a node whose store holds no record of the previous epoch.
+    /// `None` for epoch 0, and for a node whose store held no record of the previous epoch at
+    /// that time. This is a snapshot: a record written later in the epoch does not fill it in.
+    /// [`Self::get_committee_keys_for_epoch`] falls back to the store in that case.
     pub fn previous_committee(&self) -> Option<&PreviousCommittee> {
         self.inner.prev_committee.as_ref()
     }
@@ -458,5 +460,13 @@ mod tests {
         let unknown = config_at_epoch(1, MemDatabase::default(), keypair, &mut rng);
         assert!(unknown.previous_committee().is_none());
         assert_eq!(unknown.get_committee_keys_for_epoch(0), None);
+
+        // A record written after the config was built does not fill the snapshot, but the key
+        // lookup still finds it in the store.
+        let previous = *BlsKeypair::generate(&mut rng).public();
+        let record = EpochRecord { epoch: 0, committee: vec![previous], ..Default::default() };
+        unknown.node_storage().save_epoch_record(&record).expect("record");
+        assert!(unknown.previous_committee().is_none());
+        assert_eq!(unknown.get_committee_keys_for_epoch(0), Some(vec![previous]));
     }
 }
