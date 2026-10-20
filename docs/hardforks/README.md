@@ -6,7 +6,7 @@ that protect against schedule drift.
 
 ## 1. Behavioral vs Migration Hardforks
 
-The 17 hardforks fall into two categories:
+The 18 hardforks fall into two categories:
 
 **Migration hardforks** perform a one-shot atomic state rewrite the client
 executes at the first block where the fork activates
@@ -24,7 +24,7 @@ built-in mainnet/testnet.
 `HybridRewards` is both: it performs a state rewrite (the `ConsensusRegistry`
 bytecode swap) and flips the epoch-close reward ABI from 1-arg to 2-arg.
 
-### 17-fork inventory
+### 18-fork inventory
 
 | # | Fork | Kind | Set |
 |---|------|------|-----|
@@ -45,6 +45,7 @@ bytecode swap) and flips the epoch-close reward ABI from 1-arg to 2-arg.
 | 15 | SenderAffinityLoadBalancing | behavioral | — |
 | 16 | EpochCloseSeedV2 | behavioral | — |
 | 17 | CertificateFetchEpochV2 | behavioral | — |
+| 18 | HeaderParentSigners | behavioral | — |
 
 ### What each behavioral fork does
 
@@ -64,6 +65,7 @@ What each one does:
 | `OutputSeqNormalization` | Discards batches parked at the epoch boundary (their transactions stay pooled and re-seal in the new epoch) instead of force-executing them. |
 | `EpochCloseSeedV2` | Seeds the epoch-closing block's `extra_data` with the consensus header hash, identical on every node, instead of the leader-certificate signature hash. |
 | `CertificateFetchEpochV2` | Sends certificate fetch requests stamped with the epoch their rounds refer to, so a peer that has already closed that epoch serves them from the kept tail instead of the new epoch. Gates only the request format a node sends — every node accepts both variants, but a peer that has not been upgraded cannot decode the stamped one. |
+| `HeaderParentSigners` | Puts the signer bitmap of a proposer's own previous certificate into its next header, so the set is inside a signed, committed header that every node holds identically; a certificate's own signer set is outside every commitment and can legitimately differ between nodes. Voters refuse a header whose claim differs from the parent certificate they hold, and the hybrid reward tally credits participation from these claims instead of certificate authorship. Judged per epoch at its first block; nodes that have not upgraded cannot decode the new header layout. |
 
 The seven migration forks' behavior is described by their set in section 2.
 
@@ -140,7 +142,7 @@ On a new chain these values are required for correctness, but the node does not 
 The 10 behavioral forks (`Eip1559`, `BatchDigestV2`, `PrecompileGasFix`,
 `TransactionLoadBalancing`, `EmptyOutputBlock`, `DynamicCommitteeSizing`,
 `OutputSeqNormalization`, `SenderAffinityLoadBalancing`, `EpochCloseSeedV2`,
-`CertificateFetchEpochV2`) change protocol behavior without state writes.
+`CertificateFetchEpochV2`, `HeaderParentSigners`) change protocol behavior without state writes.
 Their activation blocks are network-coordinated rollout or risk decisions
 (SRE), not contract-state consistency requirements.
 
@@ -156,7 +158,7 @@ This is why behavioral forks are:
 
 | layer | what it protects | where |
 |-------|-----------------|-------|
-| **CI freeze tests** | mainnet and testnet baked schedules (full 17-fork literal tables) | `chainspec.rs` |
+| **CI freeze tests** | mainnet and testnet baked schedules (full 18-fork literal tables) | `chainspec.rs` |
 | **Boot shape gate** (`verify_schedule_shape`) | all non-mainnet/testnet chain-ids on the relaxed rules; mainnet/testnet chain-ids always excluded | `network_profile/shape.rs` |
 | **Schedule-record gate** (`schedule-record.yaml`, trust-on-first-use) | per-datadir drift on all networks | `network_profile/verify.rs` |
 | **Genesis ceremony** | out of scope by decision | — |

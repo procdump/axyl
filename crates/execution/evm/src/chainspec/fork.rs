@@ -54,6 +54,13 @@ hardfork!(
         /// already closed that epoch serves them from the tail it kept instead of answering from
         /// the new epoch. Gates only the request format a node sends; every node accepts both.
         CertificateFetchEpochV2,
+        /// Carry the signer bitmap of a proposer's own previous certificate inside its next
+        /// header, so the set rides in a signed, committed header every node holds identically
+        /// (a certificate's own signer set is not part of any commitment and can legitimately
+        /// differ between nodes). Voters check the claim against the parent certificate they
+        /// hold, and the hybrid reward tally credits participation from these claims instead of
+        /// from certificate authorship. Switches per epoch, judged at the epoch's first block.
+        HeaderParentSigners,
     }
 );
 
@@ -78,6 +85,7 @@ impl RaylsHardFork {
             Self::SenderAffinityLoadBalancing => 0x0f,
             Self::EpochCloseSeedV2 => 0x10,
             Self::CertificateFetchEpochV2 => 0x11,
+            Self::HeaderParentSigners => 0x12,
         }
     }
 
