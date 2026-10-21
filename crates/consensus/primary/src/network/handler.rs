@@ -1,7 +1,9 @@
 //! Handle specific request types received from the network.
 
 use super::{
-    message::{ConsensusResult, MissingCertificatesRequest, PrimaryRPCError},
+    message::{
+        ConsensusResult, MissingCertificatesRequest, PrimaryRPCError, MAX_SKIP_ROUND_AUTHORITIES,
+    },
     AuthEquivocationMap, PrimaryResponse,
 };
 use crate::{
@@ -121,6 +123,15 @@ where
         consensus_bus: ConsensusBus,
         rayls_consensus_state_sync: StateSynchronizer<DB>,
     ) -> Self {
+        let committee_size = largest_committee_size(&consensus_config);
+        if committee_size > MAX_SKIP_ROUND_AUTHORITIES {
+            error!(
+                target: "primary::handler",
+                committee = committee_size,
+                limit = MAX_SKIP_ROUND_AUTHORITIES,
+                "committee is larger than a missing-certificates request may name, so missing-certificates requests between members will be refused"
+            );
+        }
         Self {
             consensus_config,
             consensus_bus,
@@ -802,14 +813,33 @@ where
 
     /// Retrieve missing certificates, bounded by time and chunk size.
     /// MDBX reads are offloaded to `spawn_blocking`.
+    ///
+    /// The request is checked for size before any bitmap decoding or storage read.
     pub(crate) async fn retrieve_missing_certs(
         &self,
         request: MissingCertificatesRequest,
         requested_epoch: Option<Epoch>,
     ) -> PrimaryNetworkResult<PrimaryResponse> {
+        // The epoch the request is served from decides which committee its list is sized for.
+        let scope = fetch_scope(requested_epoch, self.consensus_config.committee().epoch());
+        // A request outside our epoch and the kept tail is answered empty, so its size is not
+        // checked. A peer already in the next epoch names that epoch's committee, which may
+        // be larger.
+        if let Some(scope) = scope {
+            let limit = if requested_epoch.is_none() {
+                unstamped_authority_limit(&self.consensus_config)
+            } else {
+                requested_authority_limit(&self.consensus_config, scope)
+            };
+            let named = request.skip_rounds.named();
+            if named > limit {
+                debug!(target: "primary::handler", authorities = named, limit, "missing-certificates request names too many authorities");
+                return Err(PrimaryNetworkError::TooManyAuthorities(named, limit));
+            }
+        }
         let consensus_config = self.consensus_config.clone();
         tokio::task::spawn_blocking(move || {
-            collect_missing_certs_blocking(request, requested_epoch, consensus_config)
+            collect_missing_certs_blocking(request, requested_epoch, scope, consensus_config)
         })
         .await
         .map_err(|e| PrimaryNetworkError::Internal(format!("cert-collector join error: {e}")))?
@@ -930,14 +960,68 @@ where
     }
 }
 
+/// How many times the committee size a request may name, as a margin for committee changes.
+pub(crate) const REQUESTED_AUTHORITIES_PER_MEMBER: usize = 2;
+/// Smallest limit on the authorities a request may name, so small committees can still grow.
+pub(crate) const MIN_REQUESTED_AUTHORITIES: usize = 64;
+
+/// Size of the larger of this epoch's committee and the previous one, when known.
+pub(crate) fn largest_committee_size<DB: Database>(config: &ConsensusConfig<DB>) -> usize {
+    let previous = config.previous_committee().map_or(0, |prev| prev.keys().len());
+    config.committee().size().max(previous)
+}
+
+/// Most authorities a request with no epoch stamp may name.
+///
+/// Before the `CertificateFetchEpochV2` fork a request carries no epoch, so a requester still in
+/// the previous epoch names that committee while being served from the current one. The limit
+/// covers the larger of the two, so a lagging node is not refused across a committee shrink.
+pub(crate) fn unstamped_authority_limit<DB: Database>(config: &ConsensusConfig<DB>) -> usize {
+    max_requested_authorities(largest_committee_size(config))
+}
+
+/// Most authorities a request served from `scope` may name.
+///
+/// An honest request names the committee of the epoch it asks about.
+/// For the previous epoch that is the previous committee, or the decoding cap if this node has no
+/// record of it, so an honest node is not refused for data this node lacks.
+/// A current-epoch request is sized for the current committee.
+pub(crate) fn requested_authority_limit<DB: Database>(
+    config: &ConsensusConfig<DB>,
+    scope: CertScope,
+) -> usize {
+    match scope {
+        CertScope::PrevEpoch => {
+            config.previous_committee().map_or(MAX_SKIP_ROUND_AUTHORITIES, |prev| {
+                max_requested_authorities(prev.keys().len())
+            })
+        }
+        CertScope::Current => max_requested_authorities(config.committee().size()),
+    }
+}
+
+/// Most authorities a missing-certificates request may name.
+///
+/// An honest request names each committee member once.
+/// The limit never passes [MAX_SKIP_ROUND_AUTHORITIES], since decoding keeps no more entries.
+/// A committee larger than that has its honest requests refused, which the handler logs each epoch.
+pub(crate) fn max_requested_authorities(committee_size: usize) -> usize {
+    (REQUESTED_AUTHORITIES_PER_MEMBER * committee_size)
+        .clamp(MIN_REQUESTED_AUTHORITIES, MAX_SKIP_ROUND_AUTHORITIES)
+}
+
+// `clamp` panics if its floor is above its ceiling, so this is checked when building.
+const _: () = assert!(MIN_REQUESTED_AUTHORITIES <= MAX_SKIP_ROUND_AUTHORITIES);
+
 /// Run the cert-collector synchronously inside `spawn_blocking`.
 fn collect_missing_certs_blocking<DB: Database>(
     request: MissingCertificatesRequest,
     requested_epoch: Option<Epoch>,
+    scope: Option<CertScope>,
     consensus_config: ConsensusConfig<DB>,
 ) -> PrimaryNetworkResult<PrimaryResponse> {
     let our_epoch = consensus_config.committee().epoch();
-    let Some(scope) = fetch_scope(requested_epoch, our_epoch) else {
+    let Some(scope) = scope else {
         // Either the requester is ahead of us (it closed an epoch we are still finishing, routine
         // around every boundary) or it asks for an epoch older than the one we kept the tail of.
         // Neither is served from here; the requester moves on to the next peer.

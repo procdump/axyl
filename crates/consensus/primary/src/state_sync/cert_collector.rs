@@ -102,23 +102,24 @@ where
         let local_max =
             config.network_config().libp2p_config().max_rpc_message_size - *MESSAGE_OVERHEAD;
         let max_message_size = request.max_response_size.min(local_max);
-        let (lower_bound, skip_rounds) = request.get_bounds()?;
+        let max_skip_rounds =
+            config.network_config().sync_config().max_skip_rounds_for_missing_certs;
+        // Decode a skip bitmap only for an origin this node can serve.
+        // That is a member of the committee of the epoch the request is served from.
+        // The previous committee can differ, since members may join or leave at the boundary.
+        // Without a record of it, every named origin is kept, so a lagging node is not refused.
+        let committee = config.committee();
+        let previous_committee = config.previous_committee();
+        let (lower_bound, skip_rounds) =
+            request.get_bounds(max_skip_rounds, |origin| match scope {
+                CertScope::Current => committee.authority(origin).is_some(),
+                CertScope::PrevEpoch => previous_committee.is_none_or(|prev| prev.contains(origin)),
+            })?;
         let exclusive_upper_bound = request.exclusive_upper_bound;
 
         // initialize the fetch queue with the first round for each authority
         let mut fetch_queue = BinaryHeap::new();
         for (origin, rounds) in &skip_rounds {
-            // validate skip rounds count
-            if rounds.len()
-                > config.network_config().sync_config().max_skip_rounds_for_missing_certs
-            {
-                warn!(target: "cert-collector", "{} has sent {} rounds to skip", origin, rounds.len());
-
-                return Err(PrimaryNetworkError::InvalidRequest(
-                    "Request for rounds out of bounds".into(),
-                ));
-            }
-
             if let Some(next_round) = Self::find_next_round(
                 config.node_storage(),
                 scope,
