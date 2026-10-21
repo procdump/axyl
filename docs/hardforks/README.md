@@ -49,7 +49,7 @@ bytecode swap) and flips the epoch-close reward ABI from 1-arg to 2-arg.
 
 ### What each behavioral fork does
 
-The ten behavioral forks switch client behavior without a state write; the
+The eleven behavioral forks switch client behavior without a state write; the
 activation block is a rollout decision, not a state-consistency requirement.
 What each one does:
 
@@ -133,13 +133,13 @@ The canonical new-chain schedule therefore uses:
 | `Erc20PrecompileBytecode` | **exactly `Block(1)`** | The genesis has no STOP byte, so the first post-genesis block must write it. Block 0 is never executed (genesis initializes state directly, no EVM execution). A later block (e.g. 5) leaves a live EIP-161 cleanup exposure window between blocks 1 and 5. |
 | `UsdrSupplyCorrection` | **exactly `Never`** | A one-time historical mainnet rebase. The corrected value is already baked into the genesis. |
 | `HybridRewards` | **exactly `Block(1)`** | The genesis bakes the pre-hybrid `ConsensusRegistry`. The 2-arg ABI must not be live at genesis (calling it against the pre-hybrid registry reverts — fatal system call). A new chain starts the complete current protocol from the first block, with no legacy-regime window. |
-| 10 behavioral forks | any value | Business-logic based (see below). |
+| 11 behavioral forks | any value | Business-logic based (see below). |
 
 On a new chain these values are required for correctness, but the node does not enforce them: the shape gate applies only the relaxed rules of section 4 to every non-mainnet/testnet chain-id, so a deviating new-chain schedule will boot. In particular, the built-in **devnet** schedule keeps `HybridRewards: Never`, which those rules allow.
 
 ## 3. Behavioral Changes Are Business-Logic Based
 
-The 10 behavioral forks (`Eip1559`, `BatchDigestV2`, `PrecompileGasFix`,
+The 11 behavioral forks (`Eip1559`, `BatchDigestV2`, `PrecompileGasFix`,
 `TransactionLoadBalancing`, `EmptyOutputBlock`, `DynamicCommitteeSizing`,
 `OutputSeqNormalization`, `SenderAffinityLoadBalancing`, `EpochCloseSeedV2`,
 `CertificateFetchEpochV2`, `HeaderParentSigners`) change protocol behavior without state writes.
