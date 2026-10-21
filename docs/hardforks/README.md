@@ -65,7 +65,7 @@ What each one does:
 | `OutputSeqNormalization` | Discards batches parked at the epoch boundary (their transactions stay pooled and re-seal in the new epoch) instead of force-executing them. |
 | `EpochCloseSeedV2` | Seeds the epoch-closing block's `extra_data` with the consensus header hash, identical on every node, instead of the leader-certificate signature hash. |
 | `CertificateFetchEpochV2` | Sends certificate fetch requests stamped with the epoch their rounds refer to, so a peer that has already closed that epoch serves them from the kept tail instead of the new epoch. Gates only the request format a node sends — every node accepts both variants, but a peer that has not been upgraded cannot decode the stamped one. |
-| `HeaderParentSigners` | Puts the signer bitmap of a proposer's own previous certificate into its next header, so the set is inside a signed, committed header that every node holds identically; a certificate's own signer set is outside every commitment and can legitimately differ between nodes. Voters refuse a header whose claim differs from the parent certificate they hold, and the hybrid reward tally credits participation from these claims instead of certificate authorship; a proposer always votes for its own header, so a claim always names its author too, and the signal is a superset of authorship (your certificate landed, or your vote landed in someone else's). Judged per epoch at its first block. Rollout gate: every validator, observer and tool must run a version with this fork before its activation block is scheduled, because a node that has not upgraded cannot decode the new header layout and Fatal-bans the peers sending it; schedule it no earlier than `EpochCloseSeedV2`. |
+| `HeaderParentSigners` | Puts the signer bitmap of a proposer's own previous certificate into its next header, so the set is inside a signed, committed header that every node holds identically; a certificate's own signer set is outside every commitment and can legitimately differ between nodes. Voters refuse a header whose claim differs from the parent certificate they hold, and the hybrid reward tally credits participation from these claims instead of certificate authorship; a proposer always votes for its own header, so a claim always names its author too, and the signal is close to a superset of authorship, with a one-round lag (your certificate landed and your next header committed, or your vote landed in someone else's certificate). Judged per epoch at its first block. Rollout gate: every validator, observer and tool must run a version with this fork before its activation block is scheduled, because a node that has not upgraded cannot decode the new header layout and Fatal-bans the peers sending it; schedule it no earlier than `EpochCloseSeedV2`. |
 
 The seven migration forks' behavior is described by their set in section 2.
 
@@ -133,7 +133,7 @@ The canonical new-chain schedule therefore uses:
 | `Erc20PrecompileBytecode` | **exactly `Block(1)`** | The genesis has no STOP byte, so the first post-genesis block must write it. Block 0 is never executed (genesis initializes state directly, no EVM execution). A later block (e.g. 5) leaves a live EIP-161 cleanup exposure window between blocks 1 and 5. |
 | `UsdrSupplyCorrection` | **exactly `Never`** | A one-time historical mainnet rebase. The corrected value is already baked into the genesis. |
 | `HybridRewards` | **exactly `Block(1)`** | The genesis bakes the pre-hybrid `ConsensusRegistry`. The 2-arg ABI must not be live at genesis (calling it against the pre-hybrid registry reverts — fatal system call). A new chain starts the complete current protocol from the first block, with no legacy-regime window. |
-| 11 behavioral forks | any value | Business-logic based (see below). |
+| 11 behavioral forks | any value | Business-logic based (see below); `HeaderParentSigners` only at or after `EpochCloseSeedV2`. |
 
 On a new chain these values are required for correctness, but the node does not enforce them: the shape gate applies only the relaxed rules of section 4 to every non-mainnet/testnet chain-id, so a deviating new-chain schedule will boot. In particular, the built-in **devnet** schedule keeps `HybridRewards: Never`, which those rules allow.
 
@@ -147,7 +147,11 @@ Their activation blocks are network-coordinated rollout or risk decisions
 (SRE), not contract-state consistency requirements.
 
 This is why behavioral forks are:
-- **Unchecked by the boot shape gate** — any value is valid.
+- **Unchecked by the boot shape gate** — any value is valid, with one cross-fork
+  exception: a schedule that activates `HeaderParentSigners` must activate
+  `EpochCloseSeedV2` at the same block or earlier. The gate refuses that on
+  local, devnet and any new chain; on the built-in mainnet and testnet, whose
+  schedules we author, it is an operator rule (see the fork's row above).
 - **Not frozen on the built-in mainnet/testnet** — SRE can move future
   boundaries via the schedule-record gate (config file + re-record).
 - **Frozen in CI only for the binary** — the freeze tests pin the values
