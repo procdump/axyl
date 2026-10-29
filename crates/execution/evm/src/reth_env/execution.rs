@@ -93,16 +93,33 @@ impl RethEnv {
         let parent_header = payload.parent_header.clone();
         debug!(target: "engine", ?parent_header, "retrieving state for next block");
         let state_provider: StateProviderBox = {
+            // Snapshot the in-memory chain BEFORE opening the DB read transaction. Persistence
+            // commits a block to the DB first and only then evicts it from
+            // `CanonicalInMemoryState`; the epoch-boundary `flush_persistence` does so from the
+            // epoch-manager task while this executor may be between two batches of one output.
+            // In-memory first keeps every ancestor in at least one of the two views: a block
+            // evicted after the snapshot is still held by the `ExecutedBlock` Arcs collected
+            // here, and a block evicted before it was committed before the DB txn opens below.
+            // DB first can miss a block in both views (txn opened before the commit, lookup
+            // after the eviction) and silently build on a stale state: node-6 on 2026-10-28
+            // built 103121 on the state of 103115, dropped a batch as nonce-too-high, and
+            // forked at the epoch-close block. Mirrors reth's `ConsistentProvider::new`.
+            let anchor_hash = local_chain
+                .first()
+                .map(|b| b.recovered_block.header().parent_hash)
+                .unwrap_or_else(|| parent_header.hash());
+            let ancestors: Vec<ExecutedBlock> = self
+                .canonical_in_memory_state()
+                .state_by_hash(anchor_hash)
+                .map(|state| state.chain().map(|s| s.block()).collect())
+                .unwrap_or_default();
             let db_provider = self.blockchain_provider.database_provider_ro()?;
             let latest: StateProviderBox = Box::new(LatestStateProvider::new(db_provider));
+            let historical: StateProviderBox =
+                Box::new(MemoryOverlayStateProvider::new(latest, ancestors));
             if local_chain.is_empty() {
-                let canonical_in_memory_state = self.canonical_in_memory_state();
-                Box::new(canonical_in_memory_state.state_provider(parent_header.hash(), latest))
+                historical
             } else {
-                let anchor_hash = local_chain[0].recovered_block.header().parent_hash;
-                let canonical_in_memory_state = self.canonical_in_memory_state();
-                let historical: StateProviderBox =
-                    Box::new(canonical_in_memory_state.state_provider(anchor_hash, latest));
                 let in_memory: Vec<_> = local_chain.iter().rev().cloned().collect();
                 Box::new(MemoryOverlayStateProvider::new(historical, in_memory))
             }
