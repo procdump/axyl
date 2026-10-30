@@ -2,7 +2,7 @@
 
 use super::{RaylsBlockExecutionCtx, RaylsBlockExecutor, RaylsEvm, RaylsEvmContext};
 use crate::{
-    chainspec::RaylsChainSpec,
+    chainspec::{RaylsChainSpec, RaylsHardforks},
     native_erc20::{
         abi::{eip3009, erc20, Erc20Selector},
         precompile::Erc20Precompile,
@@ -76,8 +76,19 @@ pub(crate) fn initialize_erc20_precompile(
 const ERC20_PRECOMPILE_ID: PrecompileId =
     PrecompileId::Custom(std::borrow::Cow::Borrowed("NativeERC20Wrapper"));
 
-fn create_erc20_dyn_precompile() -> DynPrecompile {
+fn create_erc20_dyn_precompile(chain_spec: Arc<RaylsChainSpec>) -> DynPrecompile {
     DynPrecompile::new(ERC20_PRECOMPILE_ID, move |mut input: PrecompileInput<'_>| {
+        // reject DELEGATECALL/CALLCODE frames once Erc20PrecompileDirectCall is active, see #319
+        if !input.is_direct_call()
+            && chain_spec.is_erc20_precompile_direct_call_active_at_block(
+                input.internals.block_number().saturating_to(),
+            )
+        {
+            return PrecompileResult::Err(PrecompileError::other(
+                "ERC-20 precompile must be called directly, not via DELEGATECALL or CALLCODE",
+            ));
+        }
+
         // reject native value: revm transfers value to 0x0400 before precompile dispatch and would
         // otherwise commit it permanently
         if input.value != U256::ZERO {
@@ -252,13 +263,16 @@ fn create_erc20_dyn_precompile() -> DynPrecompile {
 }
 
 /// Create a PrecompilesMap with the Native ERC-20 precompile registered.
-fn create_precompiles_with_erc20(spec_id: SpecId) -> PrecompilesMap {
+fn create_precompiles_with_erc20(
+    spec_id: SpecId,
+    chain_spec: Arc<RaylsChainSpec>,
+) -> PrecompilesMap {
     let mut precompiles_map =
         PrecompilesMap::from_static(Precompiles::new(PrecompileSpecId::from_spec_id(spec_id)));
 
     // Only register the ERC-20 precompile if it's been initialized
     if ERC20_PRECOMPILE_INSTANCE.get().is_some() {
-        let erc20_dyn_precompile = create_erc20_dyn_precompile();
+        let erc20_dyn_precompile = create_erc20_dyn_precompile(chain_spec);
         precompiles_map.apply_precompile(&ERC20_PRECOMPILE_ADDRESS, |_| Some(erc20_dyn_precompile));
         debug!("Registered Native ERC-20 precompile at {:?}", ERC20_PRECOMPILE_ADDRESS);
     }
@@ -267,11 +281,18 @@ fn create_precompiles_with_erc20(spec_id: SpecId) -> PrecompilesMap {
 }
 
 /// Factory producing [`RaylsEvm`].
-#[derive(Debug, Default, Clone, Copy)]
-#[non_exhaustive]
-pub struct RaylsEvmFactory;
+#[derive(Debug, Clone)]
+pub struct RaylsEvmFactory {
+    /// Chain spec whose hardforks gate the precompiles of every EVM this factory builds.
+    chain_spec: Arc<RaylsChainSpec>,
+}
 
 impl RaylsEvmFactory {
+    /// Create a factory for `chain_spec`.
+    pub const fn new(chain_spec: Arc<RaylsChainSpec>) -> Self {
+        Self { chain_spec }
+    }
+
     /// Create an EVM with CompositeInspector (NativeErc20Inspector + custom inspector).
     ///
     /// This method wraps any inspector with NativeErc20Inspector to ensure ERC-20
@@ -285,7 +306,6 @@ impl RaylsEvmFactory {
         db: DB,
         input: EvmEnv,
         inner_inspector: I,
-        chain_spec: Arc<RaylsChainSpec>,
     ) -> RaylsEvm<DB, CompositeInspector<I>, PrecompilesMap>
     where
         DB: Database,
@@ -298,7 +318,8 @@ impl RaylsEvmFactory {
             .clone();
 
         // Create NativeErc20Inspector with chain spec for hardfork-gated gas fix
-        let native_erc20_inspector = NativeErc20Inspector::new(precompile_instance, chain_spec);
+        let native_erc20_inspector =
+            NativeErc20Inspector::new(precompile_instance, self.chain_spec.clone());
 
         // Wrap both inspectors in CompositeInspector
         let composite = CompositeInspector::new(native_erc20_inspector, inner_inspector);
@@ -315,7 +336,7 @@ impl RaylsEvmFactory {
                 .with_cfg(input.cfg_env)
                 .with_db(db)
                 .build_mainnet_with_inspector(composite)
-                .with_precompiles(create_precompiles_with_erc20(spec_id)),
+                .with_precompiles(create_precompiles_with_erc20(spec_id, self.chain_spec.clone())),
             inspect: true,
         }
     }
@@ -327,12 +348,11 @@ impl RaylsEvmFactory {
         &self,
         db: DB,
         input: EvmEnv,
-        chain_spec: Arc<RaylsChainSpec>,
     ) -> RaylsEvm<DB, CompositeInspector<NoOpInspector>, PrecompilesMap>
     where
         DB: Database,
     {
-        self.create_evm_with_native_erc20_inspector(db, input, NoOpInspector, chain_spec)
+        self.create_evm_with_native_erc20_inspector(db, input, NoOpInspector)
     }
 }
 
@@ -354,7 +374,7 @@ impl EvmFactory for RaylsEvmFactory {
                 .with_cfg(input.cfg_env)
                 .with_db(db)
                 .build_mainnet_with_inspector(NoOpInspector)
-                .with_precompiles(create_precompiles_with_erc20(spec_id)),
+                .with_precompiles(create_precompiles_with_erc20(spec_id, self.chain_spec.clone())),
             inspect: false,
         }
     }
@@ -372,7 +392,7 @@ impl EvmFactory for RaylsEvmFactory {
                 .with_cfg(input.cfg_env)
                 .with_db(db)
                 .build_mainnet_with_inspector(inspector)
-                .with_precompiles(create_precompiles_with_erc20(spec_id)),
+                .with_precompiles(create_precompiles_with_erc20(spec_id, self.chain_spec.clone())),
             inspect: true,
         }
     }

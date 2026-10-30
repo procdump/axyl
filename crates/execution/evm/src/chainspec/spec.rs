@@ -218,6 +218,15 @@ impl RaylsChainSpecBuilder {
         self
     }
 
+    /// Activate Erc20PrecompileDirectCall at `block`.
+    #[must_use = "builder method result must be used"]
+    pub fn erc20_precompile_direct_call(mut self, block: u64) -> Self {
+        self.inner
+            .hardforks
+            .insert(RaylsHardFork::Erc20PrecompileDirectCall, ForkCondition::Block(block));
+        self
+    }
+
     /// Set the minimum EIP-1559 base fee floor.
     #[must_use = "builder method result must be used"]
     pub fn min_base_fee(mut self, min_base_fee: u64) -> Self {
